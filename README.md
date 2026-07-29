@@ -18,7 +18,7 @@ Portable, single `.exe`, no installer, no dependencies beyond Forge Neo itself.
 - Launches Forge Neo automatically when the program starts, with the console shown or hidden per your preference
 - **Single-click** the tray icon to show or hide the console window
 - **Double-click** the tray icon (or use "Launch in Browser" from the menu) to open the WebUI in your browser
-- **"Open..." submenu** for quick access to your Install Folder, Models folder, and your `img2img-images`/`txt2img-images` output folders. The two image folders also list their dated subfolders (e.g. `2026-07-28`) if any exist, so you can jump straight to a specific day
+- **"Open..." submenu** for quick access to your Install Folder, Models folder, and your txt2img/img2img output folders. These read the actual configured paths from Forge Neo's own `config.json` (Settings → Saving → Paths for saving), so custom output directories are picked up automatically rather than assuming the default location. Each output folder also lists its dated subfolders (e.g. `2026-07-28`) if any exist, so you can jump straight to a specific day, and a **Refresh** option rebuilds the listings on demand instead of waiting for the automatic 60-second refresh
 - **Restart Forge Neo** from the tray menu, reliably. It kills the whole process tree rather than just closing a window, so it still works even if Windows Terminal is your default terminal app
 - Background monitoring sends a tray notification if Forge Neo's process dies unexpectedly, so a silent crash doesn't go unnoticed
 
