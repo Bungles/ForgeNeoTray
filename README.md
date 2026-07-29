@@ -36,7 +36,7 @@ Portable, single `.exe`, no installer, no dependencies beyond Forge Neo itself.
 - `--medvram` and `--lowvram` grey each other out, since they're mutually exclusive
 - `--cors-allow-origins` stays disabled until `--api` is on, since it does nothing without it
 - Anything you've set that isn't one of the 14 checkboxes lands in an "Additional arguments" field automatically. Nothing you've customised gets dropped
-- Switching to a different `.bat` file via Browse refreshes every checkbox to match it, handy if you run more than one Forge Neo install
+- Switching to a different `.bat` file via Browse refreshes argument checkboxes to match it, handy if you run more than one Forge Neo install
 - A backup copy of your `.bat` (`webui-user.bat.bak`) is made before every save
 
 ### First-run setup
