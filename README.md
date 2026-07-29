@@ -57,4 +57,4 @@ Portable, single `.exe`, no installer, no dependencies beyond Forge Neo itself.
 ## Building from source
 Compile `ForgeNeoTray.ahk` with [Ahk2Exe](https://www.autohotkey.com/) using AutoHotkey v2. No external libraries required.
 
-To get the custom tray icon rather than the default AutoHotkey one, select `ForgeNeoTray.ico` in Ahk2Exe's Icon field when compiling — the icon isn't referenced inside the script itself, so it needs to be set manually each time.
+To get the custom tray icon rather than the default AutoHotkey one, select `ForgeNeoTray.ico` in Ahk2Exe's Icon field when compiling.
