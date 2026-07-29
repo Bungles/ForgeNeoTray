@@ -42,7 +42,7 @@ Portable, single `.exe`, no installer, no dependencies beyond Forge Neo itself.
 ### First-run setup
 - If `webui-user.bat` is in the same folder as the `.exe`, it's found automatically
 - If not, locate it via a dialogue
-- Works from any folder — store the `.exe` anywhere
+- Store the `.exe` anywhere
 
 ## Requirements
 - Windows 10 or 11
