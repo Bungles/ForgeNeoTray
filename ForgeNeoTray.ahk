@@ -175,8 +175,10 @@ SetTrayIcon() {
     OpenMenu := Menu()
     OpenMenu.Add("Install Folder", OpenInstallFolder)
     AddFolderMenuItem(OpenMenu, "Models", ForgeNeoDir "\models")
-    AddFolderMenuItem(OpenMenu, "img2img-images", ForgeNeoDir "\output\img2img-images", false)
-    AddFolderMenuItem(OpenMenu, "txt2img-images", ForgeNeoDir "\output\txt2img-images", false)
+    AddFolderMenuItem(OpenMenu, "txt2img output", GetForgeOutputDir("txt2img"), false)
+    AddFolderMenuItem(OpenMenu, "img2img output", GetForgeOutputDir("img2img"), false)
+    OpenMenu.Add()
+    OpenMenu.Add("Refresh", (*) => SetTrayIcon())
     A_TrayMenu.Add("Open...", OpenMenu)
 
     A_TrayMenu.Add()
@@ -231,9 +233,51 @@ OpenInstallFolder(*) {
     Run(ForgeNeoDir)
 }
 
+; True if p looks like an absolute path (drive letter or UNC), rather than one meant to
+; be relative to the Forge Neo install folder.
+IsAbsolutePath(p) {
+    return RegExMatch(p, "^[A-Za-z]:[\\/]") || SubStr(p, 1, 2) = "\\"
+}
+
+; Pulls a single string value out of Forge Neo's own config.json by key name, without a
+; full JSON parser — we only ever need one or two known keys, so a targeted regex match
+; (with basic \" and \\ unescaping) is simpler and more robust than parsing the whole
+; file. Returns "" if the file doesn't exist yet (e.g. Forge Neo has never been launched)
+; or the key isn't present.
+GetForgeConfigValue(key) {
+    global ForgeNeoDir
+    configPath := ForgeNeoDir "\config.json"
+    if !FileExist(configPath)
+        return ""
+    try content := FileRead(configPath)
+    catch {
+        return ""
+    }
+    if !RegExMatch(content, '"' key '"\s*:\s*"((?:[^"\\]|\\.)*)"', &m)
+        return ""
+    val := StrReplace(m[1], '\\', '\')
+    val := StrReplace(val, '\"', '"')
+    return val
+}
+
+; Resolves the actual txt2img/img2img output folder Forge Neo will use: whatever's set
+; under Settings > Saving > Paths for saving in its own config.json if customised there,
+; falling back to the standard default location otherwise.
+GetForgeOutputDir(kind) {
+    global ForgeNeoDir
+    key := (kind = "txt2img") ? "outdir_txt2img_samples" : "outdir_img2img_samples"
+    custom := GetForgeConfigValue(key)
+    if custom = ""
+        return ForgeNeoDir "\output\" kind "-images"
+    if IsAbsolutePath(custom)
+        return custom
+    return ForgeNeoDir "\" custom
+}
+
 OpenFolderPath(path) {
     if !FileExist(path) {
-        ShowCenteredNotice("Forge Neo Tray", "That folder couldn't be found:`n" path)
+        SetTrayIcon()
+        ShowCenteredNotice("Forge Neo Tray", "That folder couldn't be found:`n" WrapText(path, "\", 50) "`n`nThe tray menu refreshes every 60 seconds, so a just-deleted folder can briefly still appear. It's been refreshed now.")
         return
     }
     Run(path)
@@ -825,17 +869,19 @@ ShowRepointStartupDialog(oldPath) {
 }
 
 ; ============ Window positioning ============
-; Breaks a long description into multiple lines (ToolTip doesn't auto-wrap) by
-; inserting `n at the nearest space once a line would exceed maxLen characters.
-WrapTooltipText(text, maxLen) {
-    words := StrSplit(text, " ")
+; Breaks long text into multiple lines by inserting `n at the nearest delimiter once a
+; line would exceed maxLen characters — used for tooltip text (delimiter " ") and for
+; long unbroken paths in messages (delimiter "\", since paths have no spaces to break at
+; and an unwrapped one can force a Gui window wider than intended).
+WrapText(text, delimiter, maxLen) {
+    parts := StrSplit(text, delimiter)
     lines := []
     current := ""
-    for w in words {
-        candidate := current = "" ? w : current " " w
+    for p in parts {
+        candidate := current = "" ? p : current delimiter p
         if (StrLen(candidate) > maxLen && current != "") {
             lines.Push(current)
-            current := w
+            current := p
         } else {
             current := candidate
         }
@@ -1113,7 +1159,7 @@ OpenSettingsWindow(*) {
         }
 
         if (!shown && (A_TickCount - hoverStart) >= 600) {
-            ToolTip(WrapTooltipText(HoverTips[ctrlHwnd], 50), mx + 16, my + 16)
+            ToolTip(WrapText(HoverTips[ctrlHwnd], " ", 50), mx + 16, my + 16)
             shown := true
         }
     }
