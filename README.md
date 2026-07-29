@@ -52,7 +52,7 @@ Portable, single `.exe`, no installer, no dependencies beyond Forge Neo itself.
 ## Usage
 1. Download `ForgeNeoTray.exe` and place it in your Forge Neo folder, next to `webui-user.bat`. If it's not there, it'll ask you to locate the file on first run.
 2. Run it. Forge Neo starts automatically, and an icon appears in your tray.
-3. Right-click the tray icon for Settings, Restart, and other options.
+3. Right-click the tray icon for Settings and other functions.
 
 ## Building from source
 Compile `ForgeNeoTray.ahk` with [Ahk2Exe](https://www.autohotkey.com/) using AutoHotkey v2. No external libraries required.
