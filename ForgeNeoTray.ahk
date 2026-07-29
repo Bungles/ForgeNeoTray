@@ -48,10 +48,11 @@ if isFirstRun {
     IniWrite(0, SettingsPath, "Settings", "StartupDelaySeconds")
     IniWrite("release", SettingsPath, "Settings", "UpdateMode")
     IniWrite(0, SettingsPath, "Settings", "CheckUpdatesOnLaunch")
-    IniWrite(1, SettingsPath, "Settings", "EnableExtensionsUpdater")
+    IniWrite(0, SettingsPath, "Settings", "EnableExtensionsUpdater")
 }
 
 InitRuntimeGlobals()
+CheckStartupRegistryOnLaunch()
 
 if isFirstRun
     ShowCenteredNotice("Forge Neo Tray", "Found webui-user.bat — launching Forge Neo now.`n`nRight-click the tray icon anytime to open Settings, including if you ever move this program to a different folder later.", true)
@@ -63,7 +64,7 @@ if isFirstRun
 ; either first-run notice has everything it needs rather than hitting unassigned globals.
 InitRuntimeGlobals() {
     global SettingsPath, ForgeNeoDir, ForgeNeoBat, ForgeNeoURL, HideConsoleOnLaunch, StartupDelaySeconds
-    global RunKeyName, RunKeyPath, ForgePID, clickPending, SettingsGuiRef, SuppressCrashNotice, PendingSettingsAlwaysOnTop
+    global RunKeyName, RunKeyPath, ForgePID, clickPending, SettingsGuiRef, SuppressCrashNotice, PendingSettingsAlwaysOnTop, SuppressStartupWrite
     global UpdateMode, CheckUpdatesOnLaunch, EnableExtensionsUpdater
 
     ForgeNeoDir := IniRead(SettingsPath, "Settings", "ForgeNeoDir", A_ScriptDir)
@@ -73,7 +74,7 @@ InitRuntimeGlobals() {
     StartupDelaySeconds := Integer(IniRead(SettingsPath, "Settings", "StartupDelaySeconds", "0"))
     UpdateMode := IniRead(SettingsPath, "Settings", "UpdateMode", "release")
     CheckUpdatesOnLaunch := Integer(IniRead(SettingsPath, "Settings", "CheckUpdatesOnLaunch", "0"))
-    EnableExtensionsUpdater := Integer(IniRead(SettingsPath, "Settings", "EnableExtensionsUpdater", "1"))
+    EnableExtensionsUpdater := Integer(IniRead(SettingsPath, "Settings", "EnableExtensionsUpdater", "0"))
     RunKeyName := "ForgeNeoTray"
     RunKeyPath := "HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -84,6 +85,7 @@ InitRuntimeGlobals() {
     SettingsGuiRef := 0
     SuppressCrashNotice := false
     PendingSettingsAlwaysOnTop := false
+    SuppressStartupWrite := false
 }
 
 StartForgeAndTray()
@@ -104,6 +106,26 @@ StartForgeAndTray() {
     SetTimer(SetTrayIcon, 60000)
     if CheckUpdatesOnLaunch
         SetTimer(CheckUpdatesSilently, -5000)
+}
+
+; Runs once per launch, regardless of whether Settings ever gets opened this session —
+; catches a startup entry left pointing at a different copy of ForgeNeoTray.exe (e.g.
+; from testing multiple install locations) before it goes unnoticed indefinitely.
+CheckStartupRegistryOnLaunch() {
+    global SuppressStartupWrite
+    existingPath := GetStartupRegistryPath()
+    if existingPath = "" || existingPath = A_ScriptFullPath
+        return
+    choice := ShowRepointStartupDialog(existingPath)
+    if choice.rewrite
+        SetStartupState(true)
+    else
+        SuppressStartupWrite := true
+}
+
+ClearStartupSuppress(*) {
+    global SuppressStartupWrite
+    SuppressStartupWrite := false
 }
 
 TrayClickHandler(*) {
@@ -277,13 +299,6 @@ KillForgeProcess() {
     ForgePID := 0
 }
 
-; Confirmation dialog shown once an update is known to be available, for both the core
-; repo and individual extensions. Returns {proceed}. Property assignment on the returned
-; object from inside the button handlers is safe closure-wise even though it's not a
-; global — we're only ever reading the "result" reference and mutating the object it
-; points to, never reassigning the variable itself, so this sidesteps the write-to-outer-
-; local ambiguity that arrow functions run into with true globals (see
-; PendingSettingsAlwaysOnTop above).
 ; Runs a git command in the given working directory and returns its trimmed output.
 RunGitCapture(workDir, gitArgs) {
     tmp := A_Temp "\ForgeNeoTray_git_" A_TickCount "_" Random(1000, 9999) ".txt"
@@ -761,13 +776,17 @@ ExitForge(*) {
     ExitApp()
 }
 
-IsStartupEnabled() {
+; Reads the current Run-key value, stripping any surrounding quotes, so it can be
+; compared against A_ScriptFullPath (which is never quoted) regardless of whether the
+; stored value was written by this version or an older unquoted one. Returns "" if no
+; entry exists at all.
+GetStartupRegistryPath() {
     global RunKeyName, RunKeyPath
     try {
         val := RegRead(RunKeyPath, RunKeyName)
-        return (val = A_ScriptFullPath)
+        return Trim(val, '"')
     } catch {
-        return false
+        return ""
     }
 }
 
@@ -775,13 +794,34 @@ SetStartupState(enable) {
     global RunKeyName, RunKeyPath
     if enable {
         try {
-            RegWrite(A_ScriptFullPath, "REG_SZ", RunKeyPath, RunKeyName)
+            ; Quoted, matching how Windows itself writes Run-key paths — an unquoted
+            ; path with a space in it (e.g. "Program Files") would otherwise get
+            ; misread as the start of command-line arguments.
+            RegWrite('"' A_ScriptFullPath '"', "REG_SZ", RunKeyPath, RunKeyName)
         } catch {
             MsgBox("Couldn't update the Windows startup setting. This may be restricted by system policy.", "Forge Neo Tray", "Icon!")
         }
     } else {
         try RegDelete(RunKeyPath, RunKeyName)
     }
+}
+
+; Shown when a startup entry exists but points at a different ForgeNeoTray.exe than
+; this one — asks before silently taking it over.
+ShowRepointStartupDialog(oldPath) {
+    result := {rewrite: false}
+    Dlg := Gui("-DPIScale", "Start with Windows")
+    Dlg.SetFont("s10")
+    Dlg.AddText("xm ym w380", "Start with Windows is already enabled for a different ForgeNeoTray.exe:`n`n" oldPath "`n`nPoint Windows startup to this copy instead?")
+    NoBtn := Dlg.AddButton("xm y+20 w110", "No")
+    YesBtn := Dlg.AddButton("xm+250 yp w130 Default", "Use This Copy")
+    YesBtn.OnEvent("Click", (*) => (result.rewrite := true, Dlg.Destroy()))
+    NoBtn.OnEvent("Click", (*) => Dlg.Destroy())
+    Dlg.OnEvent("Close", (*) => Dlg.Destroy())
+    Dlg.Show()
+    CenterGuiOnMonitor(Dlg)
+    WinWaitClose("ahk_id " Dlg.Hwnd)
+    return result
 }
 
 ; ============ Window positioning ============
@@ -894,7 +934,8 @@ OpenSettingsWindow(*) {
     HoverTips[UrlEdit.Hwnd] := "The address Forge Neo's WebUI listens on. Only change this if you've customised the port. Requires a restart to take effect."
 
     StartupCheck := SettingsGui.AddCheckbox("xm y+15 vStartupCheck", "Start with Windows")
-    StartupCheck.Value := IsStartupEnabled()
+    StartupCheck.Value := (GetStartupRegistryPath() = A_ScriptFullPath)
+    StartupCheck.OnEvent("Click", ClearStartupSuppress)
     HoverTips[StartupCheck.Hwnd] := "Launches ForgeNeoTray automatically when Windows starts. Takes effect on your next Windows sign-in, not immediately."
 
     HideConsoleCheck := SettingsGui.AddCheckbox("x+30 yp vHideConsoleCheck", "Hide console window on launch")
@@ -1124,7 +1165,8 @@ OpenSettingsWindow(*) {
         UpdateMode := newUpdateMode
         CheckUpdatesOnLaunch := newCheckUpdates
         EnableExtensionsUpdater := newExtUpdater
-        SetStartupState(saved.StartupCheck)
+        if !SuppressStartupWrite
+            SetStartupState(saved.StartupCheck)
 
         IniWrite(ForgeNeoDir, SettingsPath, "Settings", "ForgeNeoDir")
         IniWrite(ForgeNeoBat, SettingsPath, "Settings", "ForgeNeoBat")
@@ -1329,9 +1371,10 @@ FirstRunSetup() {
         IniWrite(0, SettingsPath, "Settings", "StartupDelaySeconds")
         IniWrite("release", SettingsPath, "Settings", "UpdateMode")
         IniWrite(0, SettingsPath, "Settings", "CheckUpdatesOnLaunch")
-        IniWrite(1, SettingsPath, "Settings", "EnableExtensionsUpdater")
+        IniWrite(0, SettingsPath, "Settings", "EnableExtensionsUpdater")
 
         InitRuntimeGlobals()
+        CheckStartupRegistryOnLaunch()
         SetupGui.Destroy()
 
         ShowCenteredNotice("Forge Neo Tray", "Setup complete — launching Forge Neo now.`n`nRight-click the tray icon anytime to open Settings, including if you ever move this program to a different folder later.", true)
