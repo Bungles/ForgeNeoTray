@@ -4,7 +4,7 @@
 
 # ForgeNeoTray
 
-A lightweight system tray launcher for [Forge Neo](https://github.com/Haoming02/sd-webui-forge-classic/tree/neo). It starts Forge Neo for you, keeps the console tucked away in the tray, and gives you a proper UI for editing `webui-user.bat`'s command-line arguments — no more hand-editing a batch file every time you want to try a flag.
+A lightweight system tray launcher for [Forge Neo](https://github.com/Haoming02/sd-webui-forge-classic/tree/neo). It starts Forge Neo for you, keeps the console tucked away in the tray, and gives you a proper UI for editing `webui-user.bat`'s command-line arguments.
 
 Portable, single `.exe`, no installer, no dependencies beyond Forge Neo itself.
 
