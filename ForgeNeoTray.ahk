@@ -58,10 +58,8 @@ if isFirstRun
     ShowCenteredNotice("Forge Neo Tray", "Found webui-user.bat — launching Forge Neo now.`n`nRight-click the tray icon anytime to open Settings, including if you ever move this program to a different folder later.", true)
 ; ===================================
 
-; Reads settings from the .ini into the globals every part of the script relies on,
-; and sets up the always-needed runtime state (window detection, tray tracking vars).
-; Called both from normal startup and from FirstRunSetup, so clicking "Settings" from
-; either first-run notice has everything it needs rather than hitting unassigned globals.
+; loads settings into globals, sets up runtime state. called from both startup paths
+; so Settings works even from the first-run notice
 InitRuntimeGlobals() {
     global SettingsPath, ForgeNeoDir, ForgeNeoBat, ForgeNeoURL, HideConsoleOnLaunch, StartupDelaySeconds
     global RunKeyName, RunKeyPath, ForgePID, clickPending, SettingsGuiRef, SuppressCrashNotice, PendingSettingsAlwaysOnTop, SuppressStartupWrite
@@ -90,11 +88,7 @@ InitRuntimeGlobals() {
 
 StartForgeAndTray()
 
-; Launches Forge Neo (respecting the startup delay) and sets up the tray icon and
-; crash-monitor timer. Called both from normal startup and from FirstRunSetup's
-; ContinueClicked, so completing first-run setup doesn't need Reload() at all —
-; avoiding the risk of restarting the whole process out from under a Settings
-; window someone opened from the "Setup complete" notice.
+; no Reload() here on purpose - kills a Settings window if one's open
 StartForgeAndTray() {
     global StartupDelaySeconds, CheckUpdatesOnLaunch
     if StartupDelaySeconds > 0
@@ -108,9 +102,8 @@ StartForgeAndTray() {
         SetTimer(CheckUpdatesSilently, -5000)
 }
 
-; Runs once per launch, regardless of whether Settings ever gets opened this session —
-; catches a startup entry left pointing at a different copy of ForgeNeoTray.exe (e.g.
-; from testing multiple install locations) before it goes unnoticed indefinitely.
+; catches a startup entry pointing at a different copy of the exe (multiple install
+; locations, testing, etc)
 CheckStartupRegistryOnLaunch() {
     global SuppressStartupWrite
     existingPath := GetStartupRegistryPath()
@@ -175,8 +168,14 @@ SetTrayIcon() {
     OpenMenu := Menu()
     OpenMenu.Add("Install Folder", OpenInstallFolder)
     AddFolderMenuItem(OpenMenu, "Models", ForgeNeoDir "\models")
-    AddFolderMenuItem(OpenMenu, "txt2img output", GetForgeOutputDir("txt2img"), false)
-    AddFolderMenuItem(OpenMenu, "img2img output", GetForgeOutputDir("img2img"), false)
+    OpenMenu.Add("Saved Images", MakeOpenFolderCallback(GetForgeSaveDir()))
+    sharedOutputDir := GetForgeSharedOutputDir()
+    if sharedOutputDir != "" {
+        AddFolderMenuItem(OpenMenu, "Output", sharedOutputDir, false)
+    } else {
+        AddFolderMenuItem(OpenMenu, "txt2img output", GetForgeOutputDir("txt2img"), false)
+        AddFolderMenuItem(OpenMenu, "img2img output", GetForgeOutputDir("img2img"), false)
+    }
     OpenMenu.Add()
     OpenMenu.Add("Refresh", (*) => SetTrayIcon())
     A_TrayMenu.Add("Open...", OpenMenu)
@@ -233,17 +232,13 @@ OpenInstallFolder(*) {
     Run(ForgeNeoDir)
 }
 
-; True if p looks like an absolute path (drive letter or UNC), rather than one meant to
-; be relative to the Forge Neo install folder.
+; drive letter or UNC = absolute, otherwise relative to Forge Neo's folder
 IsAbsolutePath(p) {
     return RegExMatch(p, "^[A-Za-z]:[\\/]") || SubStr(p, 1, 2) = "\\"
 }
 
-; Pulls a single string value out of Forge Neo's own config.json by key name, without a
-; full JSON parser — we only ever need one or two known keys, so a targeted regex match
-; (with basic \" and \\ unescaping) is simpler and more robust than parsing the whole
-; file. Returns "" if the file doesn't exist yet (e.g. Forge Neo has never been launched)
-; or the key isn't present.
+; grabs one value out of config.json without a full JSON parser - not worth it for
+; two keys
 GetForgeConfigValue(key) {
     global ForgeNeoDir
     configPath := ForgeNeoDir "\config.json"
@@ -260,15 +255,36 @@ GetForgeConfigValue(key) {
     return val
 }
 
-; Resolves the actual txt2img/img2img output folder Forge Neo will use: whatever's set
-; under Settings > Saving > Paths for saving in its own config.json if customised there,
-; falling back to the standard default location otherwise.
+; reads the real output dirs from config.json if set, otherwise the default guess
 GetForgeOutputDir(kind) {
     global ForgeNeoDir
     key := (kind = "txt2img") ? "outdir_txt2img_samples" : "outdir_img2img_samples"
     custom := GetForgeConfigValue(key)
     if custom = ""
         return ForgeNeoDir "\output\" kind "-images"
+    if IsAbsolutePath(custom)
+        return custom
+    return ForgeNeoDir "\" custom
+}
+
+; "Directory for saving images using the Save button" - defaults to output\images
+GetForgeSaveDir() {
+    global ForgeNeoDir
+    custom := GetForgeConfigValue("outdir_save")
+    if custom = ""
+        return ForgeNeoDir "\output\images"
+    if IsAbsolutePath(custom)
+        return custom
+    return ForgeNeoDir "\" custom
+}
+
+; "Output Directory" under Settings > Saving > Paths for saving - if set, this
+; overrides the separate txt2img/img2img folders and sends everything to one place
+GetForgeSharedOutputDir() {
+    global ForgeNeoDir
+    custom := GetForgeConfigValue("outdir_samples")
+    if custom = ""
+        return ""
     if IsAbsolutePath(custom)
         return custom
     return ForgeNeoDir "\" custom
@@ -283,17 +299,13 @@ OpenFolderPath(path) {
     Run(path)
 }
 
-; AHK reuses the same loop variable across iterations rather than giving each one its
-; own binding, so a callback created directly inside a loop would end up pointing at
-; whatever the variable holds after the loop finishes (always the last folder) rather
-; than the one it was created for. Routing through a real function call like this one
-; gives each callback its own genuinely separate parameter instead.
+; AHK reuses the loop var across iterations, so a closure made directly in the loop
+; would always point at the last folder. this factory fixes that.
 MakeOpenFolderCallback(path) {
     return (*) => OpenFolderPath(path)
 }
 
-; Returns YYYY-MM-DD-named subfolders of parentDir, newest first, or an empty array if
-; the folder doesn't exist or has none — used to build the date drill-down submenus.
+; YYYY-MM-DD subfolders, newest first
 GetDateSubfolders(parentDir) {
     names := []
     if !FileExist(parentDir)
@@ -310,9 +322,7 @@ GetDateSubfolders(parentDir) {
     return StrSplit(Sort(joined, "R"), "`n")
 }
 
-; Adds a folder entry to the Open... submenu. If the folder has date-named subfolders,
-; it becomes its own submenu (an "Open X Folder" entry plus one entry per date);
-; otherwise it's just a direct clickable item.
+; becomes a submenu if there are date subfolders, otherwise just a plain item
 AddFolderMenuItem(parentMenu, label, folderPath, includeOpenEntry := true) {
     dateFolders := GetDateSubfolders(folderPath)
     if dateFolders.Length = 0 {
@@ -329,12 +339,8 @@ AddFolderMenuItem(parentMenu, label, folderPath, includeOpenEntry := true) {
     parentMenu.Add(label, subMenu)
 }
 
-; Kills the launched cmd.exe process and everything under it (python, etc.) by PID
-; rather than by window handle. WinClose-by-PID is unreliable here because on systems
-; where Windows Terminal is the default terminal app, the visible console window is
-; owned by WindowsTerminal.exe, not by cmd.exe's own PID — so WinExist/WinClose can't
-; find it. taskkill /T works directly against the process tree regardless of which
-; window (if any) is hosting it.
+; taskkill /T kills by PID tree, not window handle - WinClose doesn't work here since
+; Windows Terminal (if it's your default) owns the actual window, not cmd.exe
 KillForgeProcess() {
     global ForgePID
     if ForgePID && ProcessExist(ForgePID) {
@@ -343,7 +349,6 @@ KillForgeProcess() {
     ForgePID := 0
 }
 
-; Runs a git command in the given working directory and returns its trimmed output.
 RunGitCapture(workDir, gitArgs) {
     tmp := A_Temp "\ForgeNeoTray_git_" A_TickCount "_" Random(1000, 9999) ".txt"
     RunWait('cmd.exe /c cd /d "' workDir '" && git ' gitArgs ' > "' tmp '" 2>&1', , "Hide")
@@ -360,8 +365,6 @@ DetectGitFailureReason(output) {
     return "See details below for the full output."
 }
 
-; Shown only once we already know a specific tagged release is genuinely available and
-; safely fast-forwardable from the current commit.
 ShowUpdateAvailableDialog(msg) {
     result := {proceed: false}
     Dlg := Gui("-DPIScale", "Update Available")
@@ -378,16 +381,13 @@ ShowUpdateAvailableDialog(msg) {
     return result
 }
 
-; True if ancestorRef is an ancestor of descendantRef — used to check, without changing
-; anything, whether fast-forwarding from the current commit to a release tag is possible.
+; read-only check, doesn't touch anything
 GitIsAncestor(workDir, ancestorRef, descendantRef) {
     exitCode := RunWait('cmd.exe /c cd /d "' workDir '" && git merge-base --is-ancestor ' ancestorRef ' ' descendantRef, , "Hide")
     return exitCode = 0
 }
 
-; A result notice with an Expand Details button that reveals the full git output in a
-; scrollable box, resizing and re-centering the window rather than showing everything
-; up front — the raw output can run to hundreds of lines on a big update.
+; expandable details box, since raw git output can run to hundreds of lines
 ShowUpdateResultNotice(summary, fullOutput, offerRestart) {
     expanded := false
     DetailsEdit := 0
@@ -414,12 +414,8 @@ ShowUpdateResultNotice(summary, fullOutput, offerRestart) {
     OkBtn.OnEvent("Click", (*) => NoticeGui.Destroy())
     NoticeGui.OnEvent("Close", (*) => NoticeGui.Destroy())
 
-    ; Individual GuiControl objects have no .Destroy() method (only the whole Gui does),
-    ; so the details box is created once, lazily, and then just toggled visible/hidden.
-    ; The empty-space bug wasn't really about create-vs-hide — it's that AHK's window
-    ; auto-sizing accounts for every control's bounds regardless of visibility. Explicitly
-    ; overriding the window height each time (based on where the buttons actually end up)
-    ; sidesteps that entirely rather than fighting the auto-size behavior.
+    ; GuiControl has no .Destroy() - toggle visible instead. window height gets
+    ; overridden manually each time since AHK's auto-size counts hidden controls too
     ToggleExpand(*) {
         expanded := !expanded
         if !IsObject(DetailsEdit)
@@ -448,16 +444,9 @@ ShowUpdateResultNotice(summary, fullOutput, offerRestart) {
     WinWaitClose("ahk_id " NoticeGui.Hwnd)
 }
 
-; Performs the read-only fetch + comparison for whichever UpdateMode is configured,
-; without ever pulling anything. Shared by the interactive tray menu check and the
-; silent launch-time check, so both use identical logic rather than two copies that
-; could drift apart. Returns {ok, available, message, fetchOutput, target, displayTarget}.
-;
-; HEAD mode fetches the specific branch by name (found via a live remote query) and
-; compares against FETCH_HEAD, rather than trusting a local origin/<branch> tracking
-; ref — those can be stale or entirely missing for single-branch clones if the remote's
-; default branch was ever renamed, since the local fetch config stays pinned to the old
-; name even though origin/HEAD correctly reports the new one.
+; shared by the tray click and the silent launch check so they can't drift apart.
+; HEAD mode fetches by branch name and compares to FETCH_HEAD instead of trusting
+; origin/<branch> locally, which goes stale if the remote's default branch got renamed
 CheckUpdateStatus() {
     global ForgeNeoDir, UpdateMode
     result := {ok: false, available: false, message: "", fetchOutput: "", target: "", displayTarget: ""}
@@ -552,8 +541,7 @@ CheckUpdateStatus() {
     return result
 }
 
-; Performs the actual fast-forward and reports the result. Only ever reached after an
-; explicit user confirmation — never called from the silent launch-time check.
+; only reached after explicit confirmation, never from the silent check
 ApplyUpdate(target, displayTarget) {
     global ForgeNeoDir
     outFile := A_Temp "\ForgeNeoTray_gitpull.txt"
@@ -594,9 +582,8 @@ CheckForUpdates(*) {
 }
 
 ; ============ Extension updates ============
-; Extensions rarely use tagged releases the way the core repo does, so these always
-; track the branch HEAD directly rather than respecting the release/HEAD Settings
-; toggle — release-tag checking would just return "no tags found" for most of them.
+; extensions don't really do tagged releases like the core repo does, so these just
+; always track HEAD regardless of the release/HEAD setting
 
 GetGitExtensionFolders() {
     global ForgeNeoDir
@@ -622,10 +609,8 @@ CheckExtensionUpdateStatus(extDir) {
     }
     branchName := m[1]
 
-    ; Fetch this specific branch explicitly, bypassing whatever restricted fetch
-    ; refspec a single-branch clone might have configured — common for extensions,
-    ; and can leave the local origin/<branch> tracking ref stale or entirely absent
-    ; if the remote's default branch was ever renamed after the clone was made.
+    ; fetch this branch by name directly - single-branch clones (common for
+    ; extensions) can leave the local tracking ref stale otherwise
     fetchOutFile := A_Temp "\ForgeNeoTray_extfetch_" A_TickCount "_" Random(1000, 9999) ".txt"
     try FileDelete(fetchOutFile)
     fetchExit := RunWait('cmd.exe /c cd /d "' extDir '" && git fetch origin ' branchName ' > "' fetchOutFile '" 2>&1', , "Hide")
@@ -672,9 +657,7 @@ ApplyExtensionUpdate(extDir, target, displayTarget) {
     return {summary: "Updated to " displayTarget ".", output: output, updated: true}
 }
 
-; Same closure-capture issue as the date-folder menu items — a factory function gives
-; each tray item its own genuinely separate extension name rather than all sharing
-; whatever the loop variable holds after it finishes.
+; same loop-var factory trick as MakeOpenFolderCallback above
 MakeUpdateExtensionCallback(extName) {
     return (*) => UpdateSingleExtension(extName)
 }
@@ -696,9 +679,7 @@ UpdateSingleExtension(extName) {
     ShowUpdateResultNotice(extName ": " result.summary, result.output, result.updated)
 }
 
-; A checkbox list, one row per extension — extensions with an update available are
-; checkable (pre-ticked); ones already current or that failed the check are shown as
-; plain greyed-out status text instead, since there's nothing actionable for them.
+; only extensions with an actual update get a checkbox, the rest are just grey text
 ShowExtensionUpdateChecklist(items) {
     result := {proceed: false, selected: []}
     Dlg := Gui("-DPIScale", "Update Extensions")
@@ -738,9 +719,8 @@ ShowExtensionUpdateChecklist(items) {
     return result
 }
 
-; A lightweight, non-blocking "please wait" window — caller must Destroy() it manually
-; once the actual work finishes. The brief Sleep lets it actually paint before whatever
-; blocking work comes next, since we're about to run several sequential RunWait calls.
+; caller has to Destroy() this manually when done. small Sleep so it actually paints
+; before the blocking git calls start
 ShowBusyNotice(text) {
     BusyGui := Gui("-DPIScale", "Please Wait")
     BusyGui.SetFont("s10")
@@ -795,8 +775,7 @@ UpdateAllExtensions(*) {
     ShowUpdateResultNotice("Updated " choice.selected.Length " extension(s). Restart Forge Neo for the changes to take effect.", combined, true)
 }
 
-; Runs in the background shortly after launch (if enabled in Settings) and only ever
-; shows a tray notification — never a dialog, never pulls anything automatically.
+; background check, tray notification only - never a dialog, never auto-installs
 CheckUpdatesSilently() {
     global ForgeNeoDir
     if !FileExist(ForgeNeoDir "\.git")
@@ -820,10 +799,7 @@ ExitForge(*) {
     ExitApp()
 }
 
-; Reads the current Run-key value, stripping any surrounding quotes, so it can be
-; compared against A_ScriptFullPath (which is never quoted) regardless of whether the
-; stored value was written by this version or an older unquoted one. Returns "" if no
-; entry exists at all.
+; strips quotes so it compares cleanly against A_ScriptFullPath either way
 GetStartupRegistryPath() {
     global RunKeyName, RunKeyPath
     try {
@@ -838,9 +814,7 @@ SetStartupState(enable) {
     global RunKeyName, RunKeyPath
     if enable {
         try {
-            ; Quoted, matching how Windows itself writes Run-key paths — an unquoted
-            ; path with a space in it (e.g. "Program Files") would otherwise get
-            ; misread as the start of command-line arguments.
+            ; quoted like Windows does it, otherwise a space in the path breaks things
             RegWrite('"' A_ScriptFullPath '"', "REG_SZ", RunKeyPath, RunKeyName)
         } catch {
             MsgBox("Couldn't update the Windows startup setting. This may be restricted by system policy.", "Forge Neo Tray", "Icon!")
@@ -850,8 +824,7 @@ SetStartupState(enable) {
     }
 }
 
-; Shown when a startup entry exists but points at a different ForgeNeoTray.exe than
-; this one — asks before silently taking it over.
+; asks before taking over someone else's startup entry
 ShowRepointStartupDialog(oldPath) {
     result := {rewrite: false}
     Dlg := Gui("-DPIScale", "Start with Windows")
@@ -869,10 +842,8 @@ ShowRepointStartupDialog(oldPath) {
 }
 
 ; ============ Window positioning ============
-; Breaks long text into multiple lines by inserting `n at the nearest delimiter once a
-; line would exceed maxLen characters — used for tooltip text (delimiter " ") and for
-; long unbroken paths in messages (delimiter "\", since paths have no spaces to break at
-; and an unwrapped one can force a Gui window wider than intended).
+; wraps text at the given delimiter once a line gets too long. tooltips use " ",
+; paths use "\" since they've got no spaces to break on
 WrapText(text, delimiter, maxLen) {
     parts := StrSplit(text, delimiter)
     lines := []
@@ -919,9 +890,7 @@ CenterGuiOnMonitor(guiObj) {
     }
 }
 
-; A plain MsgBox() has no owner window to center against this early in the script
-; (before any Gui exists), so it falls back to an arbitrary default position. This
-; builds a minimal dialog using the same centering logic as everything else instead.
+; plain MsgBox has nothing to center against this early, so use our own dialog instead
 ShowCenteredNotice(title, message, offerSettings := false, offerRestart := false) {
     NoticeGui := Gui("-DPIScale", title)
     NoticeGui.SetFont("s10")
@@ -1065,10 +1034,8 @@ OpenSettingsWindow(*) {
     LastChk := ArgCheckCtrls[ArgCheckCtrls.Length]
     LastChk.GetPos(&lx, &ly, &lw, &lh)
 
-    ; --medvram and --lowvram are mutually exclusive — grey out the other once one is
-    ; ticked, unless both were already set that way in the .bat (rare/edited by hand),
-    ; in which case leave both enabled so the user can resolve it themselves rather
-    ; than getting locked out of fixing it via the greyed-out checkboxes.
+    ; medvram/lowvram are mutually exclusive - grey out the other, unless both are
+    ; already ticked (edited by hand) in which case leave both alone so it's fixable
     if !(MedVramChk.Value && LowVramChk.Value) {
         LowVramChk.Enabled := !MedVramChk.Value
         MedVramChk.Enabled := !LowVramChk.Value
@@ -1076,9 +1043,7 @@ OpenSettingsWindow(*) {
     MedVramChk.OnEvent("Click", (*) => LowVramChk.Enabled := !MedVramChk.Value)
     LowVramChk.OnEvent("Click", (*) => MedVramChk.Enabled := !LowVramChk.Value)
 
-    ; --cors-allow-origins only does anything with --api enabled — grey it out
-    ; until then, and untick it too since a ticked-but-inert flag would otherwise
-    ; still get written to the .bat on save.
+    ; cors-allow-origins does nothing without --api, so grey it out and untick it too
     UpdateCorsEnabled(*) {
         if !ApiChk.Value
             CorsChk.Value := false
@@ -1092,9 +1057,7 @@ OpenSettingsWindow(*) {
     LeftoverEdit := SettingsGui.AddEdit("x" gridX " y+5 w575 vLeftoverArgs -Theme", ParsedArgs.leftover)
     HoverTips[LeftoverEdit.Hwnd] := "Any command-line arguments not covered by the checkboxes above, kept as-is. Requires a restart to take effect."
 
-    ; Re-parses the newly selected .bat and updates every checkbox/value box/interlock to
-    ; match it, rather than leaving the grid showing whichever file was open beforehand —
-    ; useful if you're switching between multiple Forge Neo installs' .bat files.
+    ; re-reads the newly picked .bat and updates the whole grid to match it
     BrowseAndRefreshArgs(*) {
         selected := BrowseForBat(BatEdit)
         if !selected
@@ -1148,8 +1111,7 @@ OpenSettingsWindow(*) {
         }
 
         if (ctrlHwnd != lastHwnd) {
-            ; Moved to a different control — clear anything shown and restart the delay
-            ; before showing a tooltip for this new one, rather than switching instantly.
+            ; switched controls - clear and restart the delay timer
             if shown
                 ToolTip()
             lastHwnd := ctrlHwnd
@@ -1242,9 +1204,8 @@ OpenSettingsWindow(*) {
     if keepOnTop
         WinSetAlwaysOnTop(1, "ahk_id " SettingsGui.Hwnd)
 
-    ; The first control in a Gui window gets focus automatically on Show(), and Windows
-    ; auto-selects an Edit control's full text the first time it receives focus this way.
-    ; Explicitly move the caret to the end instead, with nothing selected.
+    ; first control auto-focuses on Show() and Windows selects all its text - move
+    ; the caret to the end instead
     caretPos := StrLen(BatEdit.Value)
     SendMessage(0x00B1, caretPos, caretPos, BatEdit)
 }
@@ -1327,8 +1288,7 @@ GetArgDefs() {
     ]
 }
 
-; Pulls known flags (and their values) out of the raw args string; whatever's left over
-; (anything not in GetArgDefs) is returned separately so custom/uncommon args aren't lost.
+; unrecognized args get returned separately so nothing gets lost
 ParseArgsIntoDefs(argsStr, defs) {
     remaining := " " argsStr " "
     checked := []
@@ -1377,8 +1337,7 @@ BuildArgsString(defs, checkedArr, valuesArr, leftover) {
 }
 
 ; ============ First-run setup ============
-; Shown only when no settings file exists yet AND webui-user.bat isn't next to the exe —
-; e.g. the exe was placed on the Desktop or in its own folder rather than alongside Forge Neo.
+; only shown if there's no ini yet and the bat isn't sitting next to the exe
 FirstRunSetup() {
     global SettingsPath
 
