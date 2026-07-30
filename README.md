@@ -46,7 +46,7 @@ Portable, single `.exe`, no installer, no dependencies beyond Forge Neo itself.
 
 ## Requirements
 - Windows 10 or 11
-- [SD WebUI Forge - Neo](https://github.com/Haoming02/sd-webui-forge-classic/tree/neo) already installed, with a working `webui-user.bat`
+- [SD WebUI Forge Neo](https://github.com/Haoming02/sd-webui-forge-classic/tree/neo) already installed, with a working `webui-user.bat`
 - `git` on your `PATH`, only needed for the update-checking features. If you installed Forge Neo the normal way (via `git clone`), you already have it
 
 ## Usage
