@@ -25,7 +25,7 @@ Portable, single `.exe`, no installer, no dependencies beyond Forge Neo itself.
 ### Updates
 - **Check for Updates** from the tray. It only ever fast-forwards. If your local history can't be safely fast-forwarded, it tells you instead of resetting or discarding anything
 - Choose your update track in Settings: **Latest stable release** (tagged versions only) or **Latest commits** (tracks the branch directly, which may include unfinished work or bugs between releases)
-- Optional **silent check on launch** — a tray notification tells you if an update's available, and clicking it opens the update dialogue directly (no automatic installation)
+- Optional **silent check on launch**: a tray notification tells you if an update's available, and clicking it opens the update dialogue directly (no automatic installation)
 - **Extensions updater** (optional, toggle in Settings): update one extension at a time, or use **Update All** for a checklist showing which extensions have an update, so you can pick which ones to grab (untested as my extensions have not been updated recently)
 - Every update result can be expanded to show the actual `git` output
 - If something was actually updated, a one-click restart button appears alongside the result
