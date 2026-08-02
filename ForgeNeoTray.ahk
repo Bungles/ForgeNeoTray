@@ -3,6 +3,25 @@
 try DllCall("SetProcessDpiAwarenessContext", "ptr", -4, "int")
 Persistent()
 OnError(LogError)
+OnMessage(0x404, TrayNotifyMessageHandler)
+
+; 0x405 = NIN_BALLOONUSERCLICK, sent when the notification body itself gets clicked
+; (not just the tray icon). We only ever show one kind of TrayTip (the update check),
+; so no need to check which one - any click here means that one.
+TrayNotifyMessageHandler(wParam, lParam, msg, hwnd) {
+    global PendingUpdateStatus
+    if (lParam != 0x405)
+        return
+    if IsObject(PendingUpdateStatus) {
+        status := PendingUpdateStatus
+        PendingUpdateStatus := 0
+        choice := ShowUpdateAvailableDialog(status.message)
+        if choice.proceed
+            ApplyUpdate(status.target, status.displayTarget)
+    } else {
+        CheckForUpdates()
+    }
+}
 
 LogError(err, *) {
     logPath := A_ScriptDir "\ForgeNeoTray_error.log"
@@ -62,7 +81,7 @@ if isFirstRun
 ; so Settings works even from the first-run notice
 InitRuntimeGlobals() {
     global SettingsPath, ForgeNeoDir, ForgeNeoBat, ForgeNeoURL, HideConsoleOnLaunch, StartupDelaySeconds
-    global RunKeyName, RunKeyPath, ForgePID, clickPending, SettingsGuiRef, SuppressCrashNotice, PendingSettingsAlwaysOnTop, SuppressStartupWrite
+    global RunKeyName, RunKeyPath, ForgePID, clickPending, SettingsGuiRef, SuppressCrashNotice, PendingSettingsAlwaysOnTop, SuppressStartupWrite, PendingUpdateStatus
     global UpdateMode, CheckUpdatesOnLaunch, EnableExtensionsUpdater
 
     ForgeNeoDir := IniRead(SettingsPath, "Settings", "ForgeNeoDir", A_ScriptDir)
@@ -84,6 +103,7 @@ InitRuntimeGlobals() {
     SuppressCrashNotice := false
     PendingSettingsAlwaysOnTop := false
     SuppressStartupWrite := false
+    PendingUpdateStatus := 0
 }
 
 StartForgeAndTray()
@@ -369,9 +389,9 @@ ShowUpdateAvailableDialog(msg) {
     result := {proceed: false}
     Dlg := Gui("-DPIScale", "Update Available")
     Dlg.SetFont("s10")
-    Dlg.AddText("xm ym w360", msg)
+    Dlg.AddText("xm ym w400", msg)
     CancelBtn := Dlg.AddButton("xm y+20 w110", "Cancel")
-    UpdateBtn := Dlg.AddButton("xm+220 yp w140 Default", "Update Now")
+    UpdateBtn := Dlg.AddButton("xm+260 yp w140 Default", "Update Now")
     UpdateBtn.OnEvent("Click", (*) => (result.proceed := true, Dlg.Destroy()))
     CancelBtn.OnEvent("Click", (*) => Dlg.Destroy())
     Dlg.OnEvent("Close", (*) => Dlg.Destroy())
@@ -385,6 +405,44 @@ ShowUpdateAvailableDialog(msg) {
 GitIsAncestor(workDir, ancestorRef, descendantRef) {
     exitCode := RunWait('cmd.exe /c cd /d "' workDir '" && git merge-base --is-ancestor ' ancestorRef ' ' descendantRef, , "Hide")
     return exitCode = 0
+}
+
+; strips any embedded `r/`n anywhere in the string, not just the ends - RunGitCapture
+; already trims leading/trailing whitespace, but this is a harder guarantee for text
+; that's about to go straight into a dialog message.
+CleanGitValue(s) {
+    return Trim(RegExReplace(s, "[`r`n]+", ""))
+}
+
+; returns the tag name if HEAD sits exactly on a numbered release tag, otherwise ""
+GetExactTagAtHead(workDir) {
+    tag := CleanGitValue(RunGitCapture(workDir, "describe --tags --exact-match HEAD"))
+    return RegExMatch(tag, "^\d+(\.\d+)*$") ? tag : ""
+}
+
+; "git describe" gives the nearest ancestor tag plus how many commits past it, e.g.
+; "2.27-15-gdac2375f" - parses that into "15 commits ahead of 2.27". Returns "" if no
+; tag is reachable at all (very old commit, or a shallow clone missing tags).
+DescribeCommitsAheadOfTag(workDir, ref) {
+    desc := CleanGitValue(RunGitCapture(workDir, "describe --tags " ref))
+    if !RegExMatch(desc, "^(\d+(?:\.\d+)*)-(\d+)-g[0-9a-fA-F]+$", &m)
+        return ""
+    plural := (m[2] = "1") ? "" : "s"
+    return m[2] " commit" plural " ahead of " m[1]
+}
+
+; "Current release: 2.27 (hash)" if HEAD is exactly a tagged release. Otherwise "Current
+; commit: hash" with "(N commits ahead of 2.27)" on its own line if we can tell how far
+; past the last release you are, or just the bare hash as a last resort.
+FormatCurrentLabel(workDir, hash) {
+    hash := CleanGitValue(hash)
+    tag := GetExactTagAtHead(workDir)
+    if tag != ""
+        return "Current release: " tag " (" hash ")"
+    aheadDesc := DescribeCommitsAheadOfTag(workDir, "HEAD")
+    if aheadDesc != ""
+        return "Current commit: " hash "`n(" aheadDesc ")"
+    return "Current commit: " hash
 }
 
 ; expandable details box, since raw git output can run to hundreds of lines
@@ -472,8 +530,8 @@ CheckUpdateStatus() {
         }
         result.ok := true
 
-        currentHash := RunGitCapture(ForgeNeoDir, "rev-parse --short HEAD")
-        targetHash := RunGitCapture(ForgeNeoDir, "rev-parse --short FETCH_HEAD")
+        currentHash := CleanGitValue(RunGitCapture(ForgeNeoDir, "rev-parse --short HEAD"))
+        targetHash := CleanGitValue(RunGitCapture(ForgeNeoDir, "rev-parse --short FETCH_HEAD"))
         if targetHash = "" {
             result.message := "Couldn't resolve the fetched commit."
             return result
@@ -492,7 +550,7 @@ CheckUpdateStatus() {
         result.available := true
         result.target := "FETCH_HEAD"
         result.displayTarget := targetHash
-        result.message := behindCount " new commit" plural " available on " branchName ".`n`nCurrent: " currentHash "`nLatest: " targetHash
+        result.message := behindCount " new commit" plural " available on " branchName ".`n`n" FormatCurrentLabel(ForgeNeoDir, currentHash) "`nLatest: " targetHash
     } else {
         fetchOutFile := A_Temp "\ForgeNeoTray_gitfetch.txt"
         try FileDelete(fetchOutFile)
@@ -519,8 +577,8 @@ CheckUpdateStatus() {
             result.message := "No tagged releases were found in this repository."
             return result
         }
-        currentHash := RunGitCapture(ForgeNeoDir, "rev-parse --short HEAD")
-        tagHash := RunGitCapture(ForgeNeoDir, "rev-parse --short " latestTag)
+        currentHash := CleanGitValue(RunGitCapture(ForgeNeoDir, "rev-parse --short HEAD"))
+        tagHash := CleanGitValue(RunGitCapture(ForgeNeoDir, "rev-parse --short " latestTag))
 
         if currentHash = tagHash {
             result.message := "Already running the latest release (" latestTag ")."
@@ -536,7 +594,7 @@ CheckUpdateStatus() {
         result.available := true
         result.target := latestTag
         result.displayTarget := latestTag
-        result.message := "Release " latestTag " is available.`n`nCurrent commit: " currentHash
+        result.message := "Release " latestTag " is available.`n`n" FormatCurrentLabel(ForgeNeoDir, currentHash) "`nTarget release: " latestTag " (" tagHash ")"
     }
     return result
 }
@@ -624,8 +682,8 @@ CheckExtensionUpdateStatus(extDir) {
     }
     result.ok := true
 
-    currentHash := RunGitCapture(extDir, "rev-parse --short HEAD")
-    targetHash := RunGitCapture(extDir, "rev-parse --short FETCH_HEAD")
+    currentHash := CleanGitValue(RunGitCapture(extDir, "rev-parse --short HEAD"))
+    targetHash := CleanGitValue(RunGitCapture(extDir, "rev-parse --short FETCH_HEAD"))
 
     if targetHash = "" {
         result.message := "Couldn't resolve the fetched commit for this extension."
@@ -777,12 +835,14 @@ UpdateAllExtensions(*) {
 
 ; background check, tray notification only - never a dialog, never auto-installs
 CheckUpdatesSilently() {
-    global ForgeNeoDir
+    global ForgeNeoDir, PendingUpdateStatus
     if !FileExist(ForgeNeoDir "\.git")
         return
     status := CheckUpdateStatus()
-    if status.ok && status.available
-        TrayTip("An update is available (" status.displayTarget "). Use 'Check for Updates' in the tray menu to install it.", "Forge Neo Tray", 1)
+    if status.ok && status.available {
+        PendingUpdateStatus := status
+        TrayTip("An update is available (" status.displayTarget "). Click this notification to update now.", "Forge Neo Tray", 1)
+    }
 }
 
 RestartForge(*) {
