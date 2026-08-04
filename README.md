@@ -8,7 +8,7 @@ A lightweight system tray launcher for [SD WebUI Forge Neo](https://github.com/H
 
 Portable, single `.exe`, no installer, no dependencies beyond Forge Neo itself.
 
-*Built with AI assistance (Claude), with extensive manual testing and debugging.*
+*Disclaimer: AI assistance (Claude) was used for debugging, optimisation, and implementation of some functions.*
 
 ![Settings window](settings_screenshot.png)
 
