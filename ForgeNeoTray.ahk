@@ -1,21 +1,33 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Force
+
+; bump this on every release - it's how ForgeNeoTray checks its own GitHub releases
+; for updates, separate from checking Forge Neo itself
+ForgeNeoTrayVersion := "1.5"
+ForgeNeoTrayGitHubRepo := "Bungles/ForgeNeoTray"
+
 try DllCall("SetProcessDpiAwarenessContext", "ptr", -4, "int")
 Persistent()
 OnError(LogError)
 OnMessage(0x404, TrayNotifyMessageHandler)
 
-; 0x405 = NIN_BALLOONUSERCLICK, sent when the notification body itself gets clicked
-; (not just the tray icon). We only ever show one kind of TrayTip (the update check),
-; so no need to check which one - any click here means that one.
+; 0x405 = NIN_BALLOONUSERCLICK - clicked the notification body itself, not the icon.
+; two different TrayTips are possible now, so check both pending flags
 TrayNotifyMessageHandler(wParam, lParam, msg, hwnd) {
-    global PendingUpdateStatus
+    global PendingUpdateStatus, PendingSelfUpdateVersion
     if (lParam != 0x405)
+        return
+    if PendingSelfUpdateVersion != "" {
+        PendingSelfUpdateVersion := ""
+        Run("https://github.com/" ForgeNeoTrayGitHubRepo "/releases/latest")
+        return
+    }
+    if TryFocusExistingUpdateFlow()
         return
     if IsObject(PendingUpdateStatus) {
         status := PendingUpdateStatus
         PendingUpdateStatus := 0
-        choice := ShowUpdateAvailableDialog(status.message)
+        choice := ShowUpdateAvailableDialog(status.message, status.target)
         if choice.proceed
             ApplyUpdate(status.target, status.displayTarget)
     } else {
@@ -25,7 +37,7 @@ TrayNotifyMessageHandler(wParam, lParam, msg, hwnd) {
 
 LogError(err, *) {
     logPath := A_ScriptDir "\ForgeNeoTray_error.log"
-    FileAppend(A_Now " - " err.Message "`n", logPath)
+    FileAppend(A_Now " - " err.Message " (line " err.Line ", " err.What ")`n", logPath)
     TrimLogFile(logPath, 500)
     MsgBox("ForgeNeoTray hit an error:`n" err.Message "`n`nLogged to:`n" logPath)
     return true
@@ -48,6 +60,9 @@ TrimLogFile(path, maxLines) {
     try {
         FileDelete(path)
         FileAppend(trimmed, path)
+    } catch {
+        ; best-effort log maintenance - a failure here (locked file, permissions,
+        ; etc.) shouldn't interrupt anything the user is actually doing
     }
 }
 
@@ -68,6 +83,9 @@ if isFirstRun {
     IniWrite("release", SettingsPath, "Settings", "UpdateMode")
     IniWrite(0, SettingsPath, "Settings", "CheckUpdatesOnLaunch")
     IniWrite(0, SettingsPath, "Settings", "EnableExtensionsUpdater")
+    IniWrite("browser", SettingsPath, "Settings", "DoubleClickAction")
+    IniWrite(200, SettingsPath, "Settings", "DoubleClickIntervalMs")
+    IniWrite(1, SettingsPath, "Settings", "CheckSelfUpdatesOnLaunch")
 }
 
 InitRuntimeGlobals()
@@ -81,8 +99,8 @@ if isFirstRun
 ; so Settings works even from the first-run notice
 InitRuntimeGlobals() {
     global SettingsPath, ForgeNeoDir, ForgeNeoBat, ForgeNeoURL, HideConsoleOnLaunch, StartupDelaySeconds
-    global RunKeyName, RunKeyPath, ForgePID, clickPending, SettingsGuiRef, SuppressCrashNotice, PendingSettingsAlwaysOnTop, SuppressStartupWrite, PendingUpdateStatus
-    global UpdateMode, CheckUpdatesOnLaunch, EnableExtensionsUpdater
+    global RunKeyName, RunKeyPath, ForgePID, clickPending, SettingsGuiRef, SuppressCrashNotice, PendingSettingsAlwaysOnTop, SuppressStartupWrite, PendingUpdateStatus, UpdateFlowGuiRef, PendingSelfUpdateVersion
+    global UpdateMode, CheckUpdatesOnLaunch, EnableExtensionsUpdater, DoubleClickAction, DoubleClickIntervalMs, CheckSelfUpdatesOnLaunch
 
     ForgeNeoDir := IniRead(SettingsPath, "Settings", "ForgeNeoDir", A_ScriptDir)
     ForgeNeoBat := IniRead(SettingsPath, "Settings", "ForgeNeoBat", "webui-user.bat")
@@ -92,6 +110,9 @@ InitRuntimeGlobals() {
     UpdateMode := IniRead(SettingsPath, "Settings", "UpdateMode", "release")
     CheckUpdatesOnLaunch := Integer(IniRead(SettingsPath, "Settings", "CheckUpdatesOnLaunch", "0"))
     EnableExtensionsUpdater := Integer(IniRead(SettingsPath, "Settings", "EnableExtensionsUpdater", "0"))
+    DoubleClickAction := IniRead(SettingsPath, "Settings", "DoubleClickAction", "browser")
+    DoubleClickIntervalMs := Integer(IniRead(SettingsPath, "Settings", "DoubleClickIntervalMs", "200"))
+    CheckSelfUpdatesOnLaunch := Integer(IniRead(SettingsPath, "Settings", "CheckSelfUpdatesOnLaunch", "1"))
     RunKeyName := "ForgeNeoTray"
     RunKeyPath := "HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -104,13 +125,15 @@ InitRuntimeGlobals() {
     PendingSettingsAlwaysOnTop := false
     SuppressStartupWrite := false
     PendingUpdateStatus := 0
+    PendingSelfUpdateVersion := ""
+    UpdateFlowGuiRef := 0
 }
 
 StartForgeAndTray()
 
 ; no Reload() here on purpose - kills a Settings window if one's open
 StartForgeAndTray() {
-    global StartupDelaySeconds, CheckUpdatesOnLaunch
+    global StartupDelaySeconds, CheckUpdatesOnLaunch, CheckSelfUpdatesOnLaunch
     if StartupDelaySeconds > 0
         SetTimer(LaunchForge, -(StartupDelaySeconds * 1000))
     else
@@ -120,6 +143,8 @@ StartForgeAndTray() {
     SetTimer(SetTrayIcon, 60000)
     if CheckUpdatesOnLaunch
         SetTimer(CheckUpdatesSilently, -5000)
+    if CheckSelfUpdatesOnLaunch
+        SetTimer(CheckForgeNeoTrayUpdateSilently, -7000)
 }
 
 ; catches a startup entry pointing at a different copy of the exe (multiple install
@@ -142,15 +167,70 @@ ClearStartupSuppress(*) {
 }
 
 TrayClickHandler(*) {
-    global clickPending
+    global clickPending, DoubleClickIntervalMs
     if clickPending {
         clickPending := false
         SetTimer(DoSingleClick, 0)
-        OpenBrowser()
+        PerformDoubleClickAction()
     } else {
         clickPending := true
-        SetTimer(DoSingleClick, -200)
+        SetTimer(DoSingleClick, -DoubleClickIntervalMs)
     }
+}
+
+; dispatches based on the configured double-click action, defaults to browser
+; shared index-to-value mapping for the double-click dropdown
+GetDoubleClickOptionValues() {
+    return ["browser", "recentoutput", "savedimages", "installfolder", "models"]
+}
+
+PerformDoubleClickAction() {
+    global ForgeNeoDir, DoubleClickAction
+    switch DoubleClickAction {
+        case "savedimages":
+            OpenFolderPath(GetForgeSaveDir())
+        case "installfolder":
+            OpenFolderPath(ForgeNeoDir)
+        case "models":
+            OpenFolderPath(ForgeNeoDir "\models")
+        case "recentoutput":
+            folder := GetMostRecentOutputFolder()
+            if folder != ""
+                OpenFolderPath(folder)
+            else
+                ShowCenteredNotice("Forge Neo Tray", "No output folders found yet.")
+        default:
+            OpenBrowser()
+    }
+}
+
+; checks whichever output folder(s) are actually in play (the single shared one if
+; set, otherwise both txt2img and img2img) and returns the single most recent dated
+; subfolder across them, comparing date-folder names directly since YYYY-MM-DD sorts
+; correctly as plain strings
+GetMostRecentOutputFolder() {
+    candidates := []
+    sharedDir := GetForgeSharedOutputDir()
+    if sharedDir != ""
+        candidates.Push(sharedDir)
+    else {
+        candidates.Push(GetForgeOutputDir("txt2img"))
+        candidates.Push(GetForgeOutputDir("img2img"))
+    }
+    bestFolder := ""
+    bestDate := ""
+    for dir in candidates {
+        dates := GetDateSubfolders(dir)
+        if dates.Length = 0
+            continue
+        if bestFolder = "" || dates[1] > bestDate {
+            bestDate := dates[1]
+            bestFolder := dir "\" dates[1]
+        }
+    }
+    if bestFolder != ""
+        return bestFolder
+    return candidates.Length > 0 ? candidates[1] : ""
 }
 
 DoSingleClick() {
@@ -275,6 +355,39 @@ GetForgeConfigValue(key) {
     return val
 }
 
+; pulls "owner/repo" out of the git remote URL rather than hardcoding it, so this
+; keeps working if the remote ever changes. Handles both HTTPS and SSH remote formats.
+GetGitHubRepoSlug(workDir) {
+    url := RunGitCapture(workDir, "remote get-url origin")
+    if RegExMatch(url, "github\.com[:/]([^/]+/[^/.]+)", &m)
+        return m[1]
+    return ""
+}
+
+; grabs the release notes text from GitHub's API - not stored in git itself.
+; curl.exe + regex again, same as GetForgeConfigValue
+FetchGitHubReleaseNotes(workDir, tag) {
+    slug := GetGitHubRepoSlug(workDir)
+    if slug = ""
+        return ""
+    url := "https://api.github.com/repos/" slug "/releases/tags/" tag
+    tmp := A_Temp "\ForgeNeoTray_relnotes_" A_TickCount "_" Random(1000, 9999) ".json"
+    try FileDelete(tmp)
+    exitCode := RunWait('curl.exe -s -H "User-Agent: ForgeNeoTray" -o "' tmp '" "' url '"', , "Hide")
+    content := FileExist(tmp) ? FileRead(tmp) : ""
+    try FileDelete(tmp)
+    if exitCode != 0 || content = ""
+        return ""
+    if !RegExMatch(content, '"body"\s*:\s*"((?:[^"\\]|\\.)*)"', &m)
+        return ""
+    body := StrReplace(m[1], "\r\n", "`n")
+    body := StrReplace(body, "\n", "`n")
+    body := StrReplace(body, "\t", "`t")
+    body := StrReplace(body, '\"', '"')
+    body := StrReplace(body, "\\", "\")
+    return Trim(body)
+}
+
 ; reads the real output dirs from config.json if set, otherwise the default guess
 GetForgeOutputDir(kind) {
     global ForgeNeoDir
@@ -385,19 +498,86 @@ DetectGitFailureReason(output) {
     return "See details below for the full output."
 }
 
-ShowUpdateAvailableDialog(msg) {
+; releaseTag: pass a real tag for release notes, omit/FETCH_HEAD to skip (HEAD mode,
+; extensions - no GitHub release notes for those)
+; focuses an already-open update window instead of letting a second one spawn -
+; a new tray click can interrupt code paused in WinWaitClose, so without this
+; you'd get duplicate windows
+TryFocusExistingUpdateFlow() {
+    global UpdateFlowGuiRef
+    if IsObject(UpdateFlowGuiRef) {
+        try {
+            WinActivate("ahk_id " UpdateFlowGuiRef.Hwnd)
+            return true
+        } catch {
+            UpdateFlowGuiRef := 0
+        }
+    }
+    return false
+}
+
+; ShowBusyNotice doesn't self-close, caller destroys it - so this pairs with that
+; to clear UpdateFlowGuiRef too
+CloseBusyNotice(busyGui) {
+    global UpdateFlowGuiRef
+    busyGui.Destroy()
+    UpdateFlowGuiRef := 0
+}
+
+ShowUpdateAvailableDialog(msg, releaseTag := "") {
+    global ForgeNeoDir, UpdateFlowGuiRef
     result := {proceed: false}
+    expanded := false
+    NotesEdit := 0
     Dlg := Gui("-DPIScale", "Update Available")
+    UpdateFlowGuiRef := Dlg
     Dlg.SetFont("s10")
-    Dlg.AddText("xm ym w400", msg)
-    CancelBtn := Dlg.AddButton("xm y+20 w110", "Cancel")
+    MsgText := Dlg.AddText("xm ym w400", msg)
+
+    hasTag := releaseTag != "" && releaseTag != "FETCH_HEAD"
+    if hasTag {
+        ExpandBtn := Dlg.AddButton("xm y+15 w180", "Show Release Notes")
+        ExpandBtn.GetPos(&ebx, &eby, &ebw, &ebh)
+        ExpandBtn.OnEvent("Click", ToggleNotes)
+    } else {
+        MsgText.GetPos(&ebx, &eby, &ebw, &ebh)
+    }
+
+    CancelBtn := Dlg.AddButton("xm y" (eby + ebh + 15) " w110", "Cancel")
     UpdateBtn := Dlg.AddButton("xm+260 yp w140 Default", "Update Now")
     UpdateBtn.OnEvent("Click", (*) => (result.proceed := true, Dlg.Destroy()))
     CancelBtn.OnEvent("Click", (*) => Dlg.Destroy())
     Dlg.OnEvent("Close", (*) => Dlg.Destroy())
+
+    ; same lazy-create + explicit-height-override pattern already proven in
+    ; ShowUpdateResultNotice's ToggleExpand - fetches on first click only, not upfront.
+    ToggleNotes(*) {
+        expanded := !expanded
+        if !IsObject(NotesEdit) {
+            notesText := FetchGitHubReleaseNotes(ForgeNeoDir, releaseTag)
+            if notesText = ""
+                notesText := "(couldn't load release notes - check your internet connection)"
+            NotesEdit := Dlg.AddEdit("xm y" (eby + ebh + 10) " w400 h150 -Theme ReadOnly VScroll Multi", notesText)
+        }
+        NotesEdit.Visible := expanded
+        ExpandBtn.Text := expanded ? "Hide Release Notes" : "Show Release Notes"
+        if expanded {
+            NotesEdit.GetPos(&nx, &ny, &nw, &nh)
+            newY := ny + nh + 15
+        } else {
+            newY := eby + ebh + 15
+        }
+        CancelBtn.Move(, newY)
+        UpdateBtn.Move(, newY)
+        CancelBtn.GetPos(&cx, &cy, &cw, &ch)
+        Dlg.Show("h" (cy + ch + 20))
+        CenterGuiOnMonitor(Dlg)
+    }
+
     Dlg.Show()
     CenterGuiOnMonitor(Dlg)
     WinWaitClose("ahk_id " Dlg.Hwnd)
+    UpdateFlowGuiRef := 0
     return result
 }
 
@@ -447,10 +627,12 @@ FormatCurrentLabel(workDir, hash) {
 
 ; expandable details box, since raw git output can run to hundreds of lines
 ShowUpdateResultNotice(summary, fullOutput, offerRestart) {
+    global UpdateFlowGuiRef
     expanded := false
     DetailsEdit := 0
     hasDetails := Trim(fullOutput) != ""
     NoticeGui := Gui("-DPIScale", "Update Result")
+    UpdateFlowGuiRef := NoticeGui
     NoticeGui.SetFont("s10")
     SummaryText := NoticeGui.AddText("xm ym w360", summary)
 
@@ -500,6 +682,7 @@ ShowUpdateResultNotice(summary, fullOutput, offerRestart) {
     NoticeGui.Show()
     CenterGuiOnMonitor(NoticeGui)
     WinWaitClose("ahk_id " NoticeGui.Hwnd)
+    UpdateFlowGuiRef := 0
 }
 
 ; shared by the tray click and the silent launch check so they can't drift apart.
@@ -545,12 +728,13 @@ CheckUpdateStatus() {
             return result
         }
         countOutput := RunGitCapture(ForgeNeoDir, "rev-list HEAD..FETCH_HEAD --count")
-        behindCount := IsInteger(countOutput) ? Integer(countOutput) : 0
+        behindCount := RegExMatch(countOutput, "(\d+)", &cm) ? Integer(cm[1]) : 0
         plural := behindCount = 1 ? "" : "s"
+        headline := behindCount > 0 ? (behindCount " new commit" plural " available on " branchName ".") : ("New commits available on " branchName ".")
         result.available := true
         result.target := "FETCH_HEAD"
         result.displayTarget := targetHash
-        result.message := behindCount " new commit" plural " available on " branchName ".`n`n" FormatCurrentLabel(ForgeNeoDir, currentHash) "`nLatest: " targetHash
+        result.message := headline "`n`n" FormatCurrentLabel(ForgeNeoDir, currentHash) "`nLatest: " targetHash
     } else {
         fetchOutFile := A_Temp "\ForgeNeoTray_gitfetch.txt"
         try FileDelete(fetchOutFile)
@@ -619,20 +803,22 @@ ApplyUpdate(target, displayTarget) {
 CheckForUpdates(*) {
     global ForgeNeoDir
 
+    if TryFocusExistingUpdateFlow()
+        return
     if !FileExist(ForgeNeoDir "\.git") {
-        ShowCenteredNotice("Forge Neo Tray", "This doesn't look like a git installation (no .git folder found in your Forge Neo directory), so it can't be updated this way.")
+        ShowUpdateResultNotice("This doesn't look like a git installation (no .git folder found in your Forge Neo directory), so it can't be updated this way.", "", false)
         return
     }
 
     busy := ShowBusyNotice("Checking for updates...")
     status := CheckUpdateStatus()
-    busy.Destroy()
+    CloseBusyNotice(busy)
     if !status.ok || !status.available {
         ShowUpdateResultNotice(status.message, status.fetchOutput, false)
         return
     }
 
-    choice := ShowUpdateAvailableDialog(status.message)
+    choice := ShowUpdateAvailableDialog(status.message, status.target)
     if !choice.proceed
         return
 
@@ -722,10 +908,12 @@ MakeUpdateExtensionCallback(extName) {
 
 UpdateSingleExtension(extName) {
     global ForgeNeoDir
+    if TryFocusExistingUpdateFlow()
+        return
     extDir := ForgeNeoDir "\extensions\" extName
     busy := ShowBusyNotice("Checking " extName " for updates...")
     status := CheckExtensionUpdateStatus(extDir)
-    busy.Destroy()
+    CloseBusyNotice(busy)
     if !status.ok || !status.available {
         ShowUpdateResultNotice(extName ": " status.message, status.fetchOutput, false)
         return
@@ -739,15 +927,17 @@ UpdateSingleExtension(extName) {
 
 ; only extensions with an actual update get a checkbox, the rest are just grey text
 ShowExtensionUpdateChecklist(items) {
+    global UpdateFlowGuiRef
     result := {proceed: false, selected: []}
     Dlg := Gui("-DPIScale", "Update Extensions")
+    UpdateFlowGuiRef := Dlg
     Dlg.SetFont("s10")
     Dlg.AddText("xm ym w400", "Select which extensions to update:")
     y := 40
     rows := []
     for it in items {
         if it.status.ok && it.status.available {
-            c := Dlg.AddCheckbox("xm y" y " w400 -Theme Checked", it.name " — update available (" it.status.displayTarget ")")
+            c := Dlg.AddCheckbox("xm y" y " w400 Checked", it.name " — update available (" it.status.displayTarget ")")
             rows.Push({ctrl: c, item: it})
         } else {
             statusText := it.status.ok ? "up to date" : "check failed"
@@ -756,8 +946,8 @@ ShowExtensionUpdateChecklist(items) {
         }
         y += 26
     }
-    UpdateBtn := Dlg.AddButton("xm y" (y + 15) " w150", "Update Selected")
-    CancelBtn := Dlg.AddButton("x+20 yp w100 Default", "Cancel")
+    CancelBtn := Dlg.AddButton("xm y" (y + 15) " w110", "Cancel")
+    UpdateBtn := Dlg.AddButton("xm+250 yp w150 Default", "Update Selected")
     UpdateBtn.OnEvent("Click", ConfirmClick)
     CancelBtn.OnEvent("Click", (*) => Dlg.Destroy())
     Dlg.OnEvent("Close", (*) => Dlg.Destroy())
@@ -774,13 +964,16 @@ ShowExtensionUpdateChecklist(items) {
     Dlg.Show()
     CenterGuiOnMonitor(Dlg)
     WinWaitClose("ahk_id " Dlg.Hwnd)
+    UpdateFlowGuiRef := 0
     return result
 }
 
 ; caller has to Destroy() this manually when done. small Sleep so it actually paints
 ; before the blocking git calls start
 ShowBusyNotice(text) {
+    global UpdateFlowGuiRef
     BusyGui := Gui("-DPIScale", "Please Wait")
+    UpdateFlowGuiRef := BusyGui
     BusyGui.SetFont("s10")
     BusyGui.AddText("xm ym w300", text)
     BusyGui.Show()
@@ -791,19 +984,21 @@ ShowBusyNotice(text) {
 
 UpdateAllExtensions(*) {
     global ForgeNeoDir
+    if TryFocusExistingUpdateFlow()
+        return
     extFolders := GetGitExtensionFolders()
     if extFolders.Length = 0 {
-        ShowCenteredNotice("Forge Neo Tray", "No git-based extensions were found in your extensions folder.")
+        ShowUpdateResultNotice("No git-based extensions were found in your extensions folder.", "", false)
         return
     }
 
-    busy := ShowBusyNotice("Checking extensions for updates...")
+    busy := ShowBusyNotice("Checking for extension updates...")
     items := []
     for name in extFolders {
         dir := ForgeNeoDir "\extensions\" name
         items.Push({name: name, dir: dir, status: CheckExtensionUpdateStatus(dir)})
     }
-    busy.Destroy()
+    CloseBusyNotice(busy)
 
     anyAvailable := false
     anyFailed := false
@@ -814,7 +1009,7 @@ UpdateAllExtensions(*) {
             anyFailed := true
     }
     if !anyAvailable && !anyFailed {
-        ShowCenteredNotice("Forge Neo Tray", "All extensions are already up to date.")
+        ShowUpdateResultNotice("All extensions are already up to date.", "", false)
         return
     }
 
@@ -842,6 +1037,54 @@ CheckUpdatesSilently() {
     if status.ok && status.available {
         PendingUpdateStatus := status
         TrayTip("An update is available (" status.displayTarget "). Click this notification to update now.", "Forge Neo Tray", 1)
+    }
+}
+
+; true if remote is a newer version than localVer, comparing segment by segment as
+; numbers (not as plain strings, which would wrongly put "1.10" before "1.5")
+IsNewerVersion(remote, localVer) {
+    remoteParts := StrSplit(remote, ".")
+    localParts := StrSplit(localVer, ".")
+    loop Max(remoteParts.Length, localParts.Length) {
+        r := (A_Index <= remoteParts.Length) ? Integer(remoteParts[A_Index]) : 0
+        l := (A_Index <= localParts.Length) ? Integer(localParts[A_Index]) : 0
+        if r > l
+            return true
+        if r < l
+            return false
+    }
+    return false
+}
+
+; same curl + regex approach as FetchGitHubReleaseNotes, just against the "latest
+; release" endpoint instead of a specific tag, and pulling tag_name instead of body
+FetchForgeNeoTrayLatestVersion() {
+    global ForgeNeoTrayGitHubRepo
+    url := "https://api.github.com/repos/" ForgeNeoTrayGitHubRepo "/releases/latest"
+    tmp := A_Temp "\ForgeNeoTray_selfupdate_" A_TickCount "_" Random(1000, 9999) ".json"
+    try FileDelete(tmp)
+    exitCode := RunWait('curl.exe -s -H "User-Agent: ForgeNeoTray" -o "' tmp '" "' url '"', , "Hide")
+    content := FileExist(tmp) ? FileRead(tmp) : ""
+    try FileDelete(tmp)
+    if exitCode != 0 || content = ""
+        return ""
+    ; v? handles an optional leading "v" in the tag (e.g. v1.5), since GitHub tags
+    ; commonly use that prefix even though the version itself is just "1.5"
+    if !RegExMatch(content, '"tag_name"\s*:\s*"v?([\d.]+)"', &m)
+        return ""
+    return m[1]
+}
+
+; no git repo here, just a plain version string vs GitHub's latest tag. Click opens
+; the Releases page - no self-replace, that needs a separate helper process
+CheckForgeNeoTrayUpdateSilently() {
+    global ForgeNeoTrayVersion, PendingSelfUpdateVersion
+    latest := FetchForgeNeoTrayLatestVersion()
+    if latest = ""
+        return
+    if IsNewerVersion(latest, ForgeNeoTrayVersion) {
+        PendingSelfUpdateVersion := latest
+        TrayTip("ForgeNeoTray " latest " is available. Click this notification to view it on GitHub.", "Forge Neo Tray", 1)
     }
 }
 
@@ -947,6 +1190,9 @@ CenterGuiOnMonitor(guiObj) {
         newX := Max(L, Min(newX, R - gw))
         newY := Max(T, Min(newY, B - gh))
         guiObj.Move(newX, newY)
+    } catch {
+        ; window may already be gone (e.g. closed the instant before this ran) -
+        ; nothing to center in that case, safe to just skip silently
     }
 }
 
@@ -982,7 +1228,7 @@ ShowCenteredNotice(title, message, offerSettings := false, offerRestart := false
 
 ; ============ Settings window ============
 OpenSettingsWindow(*) {
-    global ForgeNeoDir, ForgeNeoBat, ForgeNeoURL, SettingsPath, SettingsGuiRef, HideConsoleOnLaunch, StartupDelaySeconds, PendingSettingsAlwaysOnTop, UpdateMode, CheckUpdatesOnLaunch, EnableExtensionsUpdater
+    global ForgeNeoDir, ForgeNeoBat, ForgeNeoURL, SettingsPath, SettingsGuiRef, HideConsoleOnLaunch, StartupDelaySeconds, PendingSettingsAlwaysOnTop, UpdateMode, CheckUpdatesOnLaunch, EnableExtensionsUpdater, DoubleClickAction, DoubleClickIntervalMs, CheckSelfUpdatesOnLaunch
 
     if IsObject(SettingsGuiRef) {
         WinActivate("ahk_id " SettingsGuiRef.Hwnd)
@@ -992,7 +1238,7 @@ OpenSettingsWindow(*) {
     keepOnTop := PendingSettingsAlwaysOnTop
     PendingSettingsAlwaysOnTop := false
 
-    SettingsGui := Gui("-DPIScale", "Forge Neo Tray - Settings")
+    SettingsGui := Gui("-DPIScale", "Settings (v" ForgeNeoTrayVersion ")")
     SettingsGuiRef := SettingsGui
     SettingsGui.SetFont("s10")
     HoverTips := Map()
@@ -1006,12 +1252,12 @@ OpenSettingsWindow(*) {
 
     SettingsGui.AddText("xm y+15", "Forge Neo URL:")
     UrlEdit := SettingsGui.AddEdit("xm w575 vUrlEdit -Theme", ForgeNeoURL)
-    HoverTips[UrlEdit.Hwnd] := "The address Forge Neo's WebUI listens on. Only change this if you've customised the port. Requires a restart to take effect."
+    HoverTips[UrlEdit.Hwnd] := "Forge Neo's WebUI address. Only change this if you've customised the port. Requires a restart."
 
     StartupCheck := SettingsGui.AddCheckbox("xm y+15 vStartupCheck", "Start with Windows")
     StartupCheck.Value := (GetStartupRegistryPath() = A_ScriptFullPath)
     StartupCheck.OnEvent("Click", ClearStartupSuppress)
-    HoverTips[StartupCheck.Hwnd] := "Launches ForgeNeoTray automatically when Windows starts. Takes effect on your next Windows sign-in, not immediately."
+    HoverTips[StartupCheck.Hwnd] := "Launches ForgeNeoTray automatically at Windows startup. Takes effect next sign-in."
 
     HideConsoleCheck := SettingsGui.AddCheckbox("x+30 yp vHideConsoleCheck", "Hide console window on launch")
     HideConsoleCheck.Value := HideConsoleOnLaunch
@@ -1019,20 +1265,40 @@ OpenSettingsWindow(*) {
 
     SettingsGui.AddText("xm y+15", "Startup delay (seconds):")
     DelayEdit := SettingsGui.AddEdit("x+10 w60 vDelayEdit Number yp-2 -Theme", StartupDelaySeconds)
-    HoverTips[DelayEdit.Hwnd] := "Seconds to wait before the very first launch after Windows starts. Only applies at startup, not to Restart Forge Neo."
+    HoverTips[DelayEdit.Hwnd] := "Delay before the first launch at Windows startup. Doesn't apply to Restart Forge Neo."
 
-    CheckUpdatesCheck := SettingsGui.AddCheckbox("xm y+10 vCheckUpdatesCheck", "Check for SD Forge Neo updates on launch")
+    SettingsGui.AddText("xm y+18", "Double-click tray icon action:")
+    DoubleClickCombo := SettingsGui.AddDropDownList("x+10 w280 vDoubleClickCombo -Theme", ["Launch in browser", "Open most recent output folder", "Open saved image folder", "Open install folder", "Open models folder"])
+    doubleClickIndex := 1
+    for i, val in GetDoubleClickOptionValues() {
+        if val = DoubleClickAction {
+            doubleClickIndex := i
+            break
+        }
+    }
+    DoubleClickCombo.Value := doubleClickIndex
+    HoverTips[DoubleClickCombo.Hwnd] := "What double-clicking the tray icon does. Single-click still shows/hides the console."
+
+    SettingsGui.AddText("xm y+15", "Tray double-click speed (ms):")
+    IntervalEdit := SettingsGui.AddEdit("x+10 w60 vIntervalEdit Number yp-2 -Theme", DoubleClickIntervalMs)
+    HoverTips[IntervalEdit.Hwnd] := "Max time between clicks that still counts as a double-click. Default 200."
+
+    CheckUpdatesCheck := SettingsGui.AddCheckbox("xm y+8 vCheckUpdatesCheck", "Check for SD Forge Neo updates on launch")
     CheckUpdatesCheck.Value := CheckUpdatesOnLaunch
-    HoverTips[CheckUpdatesCheck.Hwnd] := "Silently checks for an SD Forge Neo update a few seconds after each launch and shows a tray notification if one's found. Never installs anything automatically. You'll need to fully exit and relaunch ForgeNeoTray for this to take effect."
+    HoverTips[CheckUpdatesCheck.Hwnd] := "Checks for an SD Forge Neo update a few seconds after launch and notifies you if one's found. Never installs automatically. Needs a full restart of ForgeNeoTray to take effect."
+
+    CheckSelfUpdatesCheck := SettingsGui.AddCheckbox("xm y+15 vCheckSelfUpdatesCheck", "Check for ForgeNeoTray updates on launch")
+    CheckSelfUpdatesCheck.Value := CheckSelfUpdatesOnLaunch
+    HoverTips[CheckSelfUpdatesCheck.Hwnd] := "Checks GitHub for a newer ForgeNeoTray release after launch. Clicking the notification opens the release page - nothing installs automatically."
 
     SettingsGui.AddText("xm y+15", "Update SD Forge Neo from:")
     UpdateModeDDL := SettingsGui.AddDropDownList("x+10 w330 vUpdateModeDDL -Theme", ["Latest stable release", "Latest commits — may include WIP/bugs"])
     UpdateModeDDL.Value := (UpdateMode = "head") ? 2 : 1
-    HoverTips[UpdateModeDDL.Hwnd] := "Latest stable release only checks tagged versions. Latest commits tracks the branch directly for faster access to new features, though it may include unfinished work or unfixed bugs between releases. Applies immediately, no restart needed."
+    HoverTips[UpdateModeDDL.Hwnd] := "Latest stable release checks tagged versions only. Latest commits tracks the branch directly, newer but may include unfinished work."
 
     ExtUpdaterCheck := SettingsGui.AddCheckbox("xm y+8 vExtUpdaterCheck", "Enable extensions updater in tray menu (untested)")
     ExtUpdaterCheck.Value := EnableExtensionsUpdater
-    HoverTips[ExtUpdaterCheck.Hwnd] := "When enabled, 'Check for Updates' in the tray becomes a submenu with SD Forge Neo and Extensions options. Applies immediately, no restart needed."
+    HoverTips[ExtUpdaterCheck.Hwnd] := "Adds an Extensions option under Check for Updates in the tray."
 
     OriginalArgsStr := ReadCommandLineArgs(ForgeNeoDir "\" ForgeNeoBat)
     ArgDefsList := GetArgDefs()
@@ -1115,7 +1381,7 @@ OpenSettingsWindow(*) {
 
     SettingsGui.AddText("x" gridX " y" (ly + lh + 12), "Additional arguments:")
     LeftoverEdit := SettingsGui.AddEdit("x" gridX " y+5 w575 vLeftoverArgs -Theme", ParsedArgs.leftover)
-    HoverTips[LeftoverEdit.Hwnd] := "Any command-line arguments not covered by the checkboxes above, kept as-is. Requires a restart to take effect."
+    HoverTips[LeftoverEdit.Hwnd] := "Anything not covered by the checkboxes above, kept as-is. Requires a restart."
 
     ; re-reads the newly picked .bat and updates the whole grid to match it
     BrowseAndRefreshArgs(*) {
@@ -1160,7 +1426,11 @@ OpenSettingsWindow(*) {
         CoordMode("Mouse", "Screen")
         CoordMode("ToolTip", "Screen")
         MouseGetPos(&mx, &my, &winUnderMouse, &ctrlHwnd, 2)
-        valid := (winUnderMouse = SettingsGui.Hwnd) && HoverTips.Has(ctrlHwnd)
+        try {
+            valid := (winUnderMouse = SettingsGui.Hwnd) && HoverTips.Has(ctrlHwnd)
+        } catch {
+            valid := false
+        }
 
         if !valid {
             if shown
@@ -1195,15 +1465,22 @@ OpenSettingsWindow(*) {
     }
 
     SaveClicked(restart) {
-        global ForgeNeoDir, ForgeNeoBat, ForgeNeoURL, SettingsPath, HideConsoleOnLaunch, StartupDelaySeconds, UpdateMode, CheckUpdatesOnLaunch, EnableExtensionsUpdater
+        global ForgeNeoDir, ForgeNeoBat, ForgeNeoURL, SettingsPath, HideConsoleOnLaunch, StartupDelaySeconds, UpdateMode, CheckUpdatesOnLaunch, EnableExtensionsUpdater, DoubleClickAction, DoubleClickIntervalMs, CheckSelfUpdatesOnLaunch
         saved := SettingsGui.Submit(false)
         fullBatPath := saved.BatEdit
         newUrl := saved.UrlEdit
         newHideConsole := saved.HideConsoleCheck
         newDelay := saved.DelayEdit != "" ? Integer(saved.DelayEdit) : 0
-        newUpdateMode := (saved.UpdateModeDDL = 2) ? "head" : "release"
+        newUpdateMode := (UpdateModeDDL.Value = 2) ? "head" : "release"
         newCheckUpdates := saved.CheckUpdatesCheck
+        newCheckSelfUpdates := saved.CheckSelfUpdatesCheck
         newExtUpdater := saved.ExtUpdaterCheck
+        dcOptions := GetDoubleClickOptionValues()
+        comboVal := DoubleClickCombo.Value
+        if comboVal < 1 || comboVal > dcOptions.Length
+            comboVal := 1
+        newDoubleClickAction := dcOptions[comboVal]
+        newDoubleClickInterval := saved.IntervalEdit != "" ? Integer(saved.IntervalEdit) : 200
 
         if !FileExist(fullBatPath) {
             MsgBox("That .bat file couldn't be found. Please check the path and try again.", "Forge Neo Tray", "Icon!")
@@ -1232,7 +1509,10 @@ OpenSettingsWindow(*) {
         StartupDelaySeconds := newDelay
         UpdateMode := newUpdateMode
         CheckUpdatesOnLaunch := newCheckUpdates
+        CheckSelfUpdatesOnLaunch := newCheckSelfUpdates
         EnableExtensionsUpdater := newExtUpdater
+        DoubleClickAction := newDoubleClickAction
+        DoubleClickIntervalMs := newDoubleClickInterval
         if !SuppressStartupWrite
             SetStartupState(saved.StartupCheck)
 
@@ -1243,7 +1523,10 @@ OpenSettingsWindow(*) {
         IniWrite(StartupDelaySeconds, SettingsPath, "Settings", "StartupDelaySeconds")
         IniWrite(UpdateMode, SettingsPath, "Settings", "UpdateMode")
         IniWrite(CheckUpdatesOnLaunch, SettingsPath, "Settings", "CheckUpdatesOnLaunch")
+        IniWrite(CheckSelfUpdatesOnLaunch, SettingsPath, "Settings", "CheckSelfUpdatesOnLaunch")
         IniWrite(EnableExtensionsUpdater, SettingsPath, "Settings", "EnableExtensionsUpdater")
+        IniWrite(DoubleClickAction, SettingsPath, "Settings", "DoubleClickAction")
+        IniWrite(DoubleClickIntervalMs, SettingsPath, "Settings", "DoubleClickIntervalMs")
 
         SetTrayIcon()
         CloseSettings()
@@ -1437,6 +1720,9 @@ FirstRunSetup() {
         IniWrite("release", SettingsPath, "Settings", "UpdateMode")
         IniWrite(0, SettingsPath, "Settings", "CheckUpdatesOnLaunch")
         IniWrite(0, SettingsPath, "Settings", "EnableExtensionsUpdater")
+        IniWrite("browser", SettingsPath, "Settings", "DoubleClickAction")
+        IniWrite(200, SettingsPath, "Settings", "DoubleClickIntervalMs")
+        IniWrite(1, SettingsPath, "Settings", "CheckSelfUpdatesOnLaunch")
 
         InitRuntimeGlobals()
         CheckStartupRegistryOnLaunch()
