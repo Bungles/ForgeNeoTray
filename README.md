@@ -8,7 +8,7 @@ A lightweight system tray launcher for [SD WebUI Forge Neo](https://github.com/H
 
 Portable, single `.exe`, no installer, no dependencies beyond Forge Neo itself.
 
-*Disclaimer: AI assistance (Claude) was used for debugging, optimisation, and implementation of some functions.*
+*Built with AI assistance (Claude), with extensive manual testing and debugging throughout development.*
 
 ![Settings window](settings_screenshot.png)
 
@@ -17,18 +17,20 @@ Portable, single `.exe`, no installer, no dependencies beyond Forge Neo itself.
 ### Tray icon & launch control
 - Launches Forge Neo automatically when the program starts, with the console shown or hidden per your preference
 - **Single-click** the tray icon to show or hide the console window
-- **Double-click** the tray icon (or use "Launch in Browser" from the menu) to open the WebUI in your browser
+- **Double-click** the tray icon to launch in your browser by default, or reconfigure it in Settings to open your most recent output folder, saved images, install folder, or models folder instead. The double-click speed itself is also configurable
 - **"Open..." submenu** for quick access to your Install Folder, Models folder, Saved Images folder, and your generation output folders. These read the actual configured paths from Forge Neo's own `config.json` (Settings → Saving → Paths for saving), so custom directories are picked up automatically, including switching to a single **Output** entry instead of separate txt2img/img2img ones if you've set a shared Output Directory there. Output folders also list their dated subfolders (e.g. `2026-07-28`) if any exist. A **Refresh** option rebuilds the list on demand instead of waiting for the automatic 60-second refresh
 - **Restart Forge Neo** from the tray menu. It kills the whole process tree rather than just closing a window, so it still works even if Windows Terminal is your default terminal app
 - Background monitoring sends a tray notification if Forge Neo's process dies unexpectedly, so a silent crash doesn't go unnoticed
 
 ### Updates
 - **Check for Updates** from the tray. It only ever fast-forwards. If your local history can't be safely fast-forwarded, it tells you instead of resetting or discarding anything
+- When a release is available, you can expand the confirmation dialogue to read the actual release notes from GitHub before deciding whether to update
 - Choose your update track in Settings: **Latest stable release** (tagged versions only) or **Latest commits** (tracks the branch directly, which may include unfinished work or bugs between releases)
-- Optional **silent check on launch**: a tray notification tells you if an update's available, and clicking it opens the update dialogue directly (no automatic installation)
+- Optional **silent check on launch** — a tray notification tells you if an update's available (no automatic installation)
 - **Extensions updater** (optional, toggle in Settings): update one extension at a time, or use **Update All** for a checklist showing which extensions have an update, so you can pick which ones to grab (untested as my extensions have not been updated recently)
 - Every update result can be expanded to show the actual `git` output
 - If something was actually updated, a one-click restart button appears alongside the result
+- ForgeNeoTray also checks its own GitHub releases on launch (separate toggle in Settings, on by default). It'll notify you if a newer version is out; clicking the notification opens the release page rather than installing anything automatically
 
 ### Settings window
 - Change the path to `webui-user.bat`, the WebUI URL, launch-on-Windows-startup, console visibility, and a startup delay (useful if this runs at login before your GPU driver is ready)
