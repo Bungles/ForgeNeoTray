@@ -3,8 +3,13 @@
 
 ; bump this on every release - it's how ForgeNeoTray checks its own GitHub releases
 ; for updates, separate from checking Forge Neo itself
-ForgeNeoTrayVersion := "1.5"
+ForgeNeoTrayVersion := "1.6"
 ForgeNeoTrayGitHubRepo := "Bungles/ForgeNeoTray"
+
+; this stops Git Credential Manager from popping up 
+; a GitHub sign-in prompt on any git call we make
+EnvSet("GIT_TERMINAL_PROMPT", "0")
+EnvSet("GCM_INTERACTIVE", "never")
 
 try DllCall("SetProcessDpiAwarenessContext", "ptr", -4, "int")
 Persistent()
@@ -932,22 +937,21 @@ ShowExtensionUpdateChecklist(items) {
     Dlg := Gui("-DPIScale", "Update Extensions")
     UpdateFlowGuiRef := Dlg
     Dlg.SetFont("s10")
-    Dlg.AddText("xm ym w400", "Select which extensions to update:")
-    y := 40
+    Dlg.AddText("xm ym w450", "Select which extensions to update:")
     rows := []
     for it in items {
         if it.status.ok && it.status.available {
-            c := Dlg.AddCheckbox("xm y" y " w400 Checked", it.name " — update available (" it.status.displayTarget ")")
+            c := Dlg.AddCheckbox("xm y+8 w450", it.name " — update available (" it.status.displayTarget ")")
+            c.Value := 1
             rows.Push({ctrl: c, item: it})
         } else {
             statusText := it.status.ok ? "up to date" : "check failed"
-            Dlg.AddText("xm y" y " w400 cGray", it.name " — " statusText)
+            Dlg.AddCheckbox("xm y+8 w450 Disabled", it.name " — " statusText)
             rows.Push({ctrl: 0, item: it})
         }
-        y += 26
     }
-    CancelBtn := Dlg.AddButton("xm y" (y + 15) " w110", "Cancel")
-    UpdateBtn := Dlg.AddButton("xm+250 yp w150 Default", "Update Selected")
+    CancelBtn := Dlg.AddButton("xm y+15 w110", "Cancel")
+    UpdateBtn := Dlg.AddButton("xm+300 yp w150 Default", "Update Selected")
     UpdateBtn.OnEvent("Click", ConfirmClick)
     CancelBtn.OnEvent("Click", (*) => Dlg.Destroy())
     Dlg.OnEvent("Close", (*) => Dlg.Destroy())
@@ -1283,13 +1287,13 @@ OpenSettingsWindow(*) {
     IntervalEdit := SettingsGui.AddEdit("x+10 w60 vIntervalEdit Number yp-2 -Theme", DoubleClickIntervalMs)
     HoverTips[IntervalEdit.Hwnd] := "Max time between clicks that still counts as a double-click. Default 200."
 
-    CheckUpdatesCheck := SettingsGui.AddCheckbox("xm y+8 vCheckUpdatesCheck", "Check for SD Forge Neo updates on launch")
-    CheckUpdatesCheck.Value := CheckUpdatesOnLaunch
-    HoverTips[CheckUpdatesCheck.Hwnd] := "Checks for an SD Forge Neo update a few seconds after launch and notifies you if one's found. Never installs automatically. Needs a full restart of ForgeNeoTray to take effect."
-
-    CheckSelfUpdatesCheck := SettingsGui.AddCheckbox("xm y+15 vCheckSelfUpdatesCheck", "Check for ForgeNeoTray updates on launch")
+    CheckSelfUpdatesCheck := SettingsGui.AddCheckbox("xm y+8 vCheckSelfUpdatesCheck", "Check for ForgeNeoTray updates on launch")
     CheckSelfUpdatesCheck.Value := CheckSelfUpdatesOnLaunch
     HoverTips[CheckSelfUpdatesCheck.Hwnd] := "Checks GitHub for a newer ForgeNeoTray release after launch. Clicking the notification opens the release page - nothing installs automatically."
+
+    CheckUpdatesCheck := SettingsGui.AddCheckbox("xm y+15 vCheckUpdatesCheck", "Check for SD Forge Neo updates on launch")
+    CheckUpdatesCheck.Value := CheckUpdatesOnLaunch
+    HoverTips[CheckUpdatesCheck.Hwnd] := "Checks for an SD Forge Neo update a few seconds after launch and notifies you if one's found. Never installs automatically. Needs a full restart of ForgeNeoTray to take effect."
 
     SettingsGui.AddText("xm y+15", "Update SD Forge Neo from:")
     UpdateModeDDL := SettingsGui.AddDropDownList("x+10 w330 vUpdateModeDDL -Theme", ["Latest stable release", "Latest commits — may include WIP/bugs"])
