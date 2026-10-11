@@ -3,7 +3,7 @@
 
 ; bump this on every release - it's how ForgeNeoTray checks its own GitHub releases
 ; for updates, separate from checking Forge Neo itself
-ForgeNeoTrayVersion := "1.6"
+ForgeNeoTrayVersion := "1.7"
 ForgeNeoTrayGitHubRepo := "Bungles/ForgeNeoTray"
 
 ; this stops Git Credential Manager from popping up 
@@ -90,6 +90,7 @@ if isFirstRun {
     IniWrite(0, SettingsPath, "Settings", "EnableExtensionsUpdater")
     IniWrite("browser", SettingsPath, "Settings", "DoubleClickAction")
     IniWrite(200, SettingsPath, "Settings", "DoubleClickIntervalMs")
+    IniWrite("models", SettingsPath, "Settings", "ControlClickAction")
     IniWrite(1, SettingsPath, "Settings", "CheckSelfUpdatesOnLaunch")
 }
 
@@ -105,7 +106,7 @@ if isFirstRun
 InitRuntimeGlobals() {
     global SettingsPath, ForgeNeoDir, ForgeNeoBat, ForgeNeoURL, HideConsoleOnLaunch, StartupDelaySeconds
     global RunKeyName, RunKeyPath, ForgePID, clickPending, SettingsGuiRef, SuppressCrashNotice, PendingSettingsAlwaysOnTop, SuppressStartupWrite, PendingUpdateStatus, UpdateFlowGuiRef, PendingSelfUpdateVersion
-    global UpdateMode, CheckUpdatesOnLaunch, EnableExtensionsUpdater, DoubleClickAction, DoubleClickIntervalMs, CheckSelfUpdatesOnLaunch
+    global UpdateMode, CheckUpdatesOnLaunch, EnableExtensionsUpdater, DoubleClickAction, DoubleClickIntervalMs, CheckSelfUpdatesOnLaunch, ControlClickAction
 
     ForgeNeoDir := IniRead(SettingsPath, "Settings", "ForgeNeoDir", A_ScriptDir)
     ForgeNeoBat := IniRead(SettingsPath, "Settings", "ForgeNeoBat", "webui-user.bat")
@@ -116,6 +117,7 @@ InitRuntimeGlobals() {
     CheckUpdatesOnLaunch := Integer(IniRead(SettingsPath, "Settings", "CheckUpdatesOnLaunch", "0"))
     EnableExtensionsUpdater := Integer(IniRead(SettingsPath, "Settings", "EnableExtensionsUpdater", "0"))
     DoubleClickAction := IniRead(SettingsPath, "Settings", "DoubleClickAction", "browser")
+    ControlClickAction := IniRead(SettingsPath, "Settings", "ControlClickAction", "models")
     DoubleClickIntervalMs := Integer(IniRead(SettingsPath, "Settings", "DoubleClickIntervalMs", "200"))
     CheckSelfUpdatesOnLaunch := Integer(IniRead(SettingsPath, "Settings", "CheckSelfUpdatesOnLaunch", "1"))
     RunKeyName := "ForgeNeoTray"
@@ -172,26 +174,32 @@ ClearStartupSuppress(*) {
 }
 
 TrayClickHandler(*) {
-    global clickPending, DoubleClickIntervalMs
+    global clickPending, DoubleClickIntervalMs, DoubleClickAction, ControlClickAction
+    ; a Ctrl+click fires its own action immediately - no need to wait and see
+    ; whether a second click follows, unlike the plain double-click case
+    if GetKeyState("Ctrl", "P") {
+        PerformTrayAction(ControlClickAction)
+        return
+    }
     if clickPending {
         clickPending := false
         SetTimer(DoSingleClick, 0)
-        PerformDoubleClickAction()
+        PerformTrayAction(DoubleClickAction)
     } else {
         clickPending := true
         SetTimer(DoSingleClick, -DoubleClickIntervalMs)
     }
 }
 
-; dispatches based on the configured double-click action, defaults to browser
-; shared index-to-value mapping for the double-click dropdown
-GetDoubleClickOptionValues() {
+; dispatches based on a configured tray-click action - shared index-to-value
+; mapping for both the double-click and control-click dropdowns
+GetTrayClickOptionValues() {
     return ["browser", "recentoutput", "savedimages", "installfolder", "models"]
 }
 
-PerformDoubleClickAction() {
-    global ForgeNeoDir, DoubleClickAction
-    switch DoubleClickAction {
+PerformTrayAction(action) {
+    global ForgeNeoDir
+    switch action {
         case "savedimages":
             OpenFolderPath(GetForgeSaveDir())
         case "installfolder":
@@ -304,6 +312,7 @@ SetTrayIcon() {
         A_TrayMenu.Add("Update SD Forge Neo", CheckForUpdates)
     }
     A_TrayMenu.Add("Restart Forge Neo", RestartForge)
+
     A_TrayMenu.Add("Exit", ExitForge)
     A_TrayMenu.Default := "Show/Hide Console"
     A_TrayMenu.ClickCount := 1
@@ -364,33 +373,116 @@ GetForgeConfigValue(key) {
 ; keeps working if the remote ever changes. Handles both HTTPS and SSH remote formats.
 GetGitHubRepoSlug(workDir) {
     url := RunGitCapture(workDir, "remote get-url origin")
-    if RegExMatch(url, "github\.com[:/]([^/]+/[^/.]+)", &m)
+    if RegExMatch(url, "github\.com[:/]([^/\s]+/[^/.\s]+)", &m)
         return m[1]
     return ""
 }
 
+; plain HTTP GET returning the body as text. Tries WinHTTP first (built into Windows:
+; no child process, no temp file, and it decodes the response as UTF-8 properly), then
+; falls back to curl.exe. Returns the HTTP status, or 0 if it isn't known (curl path) or
+; nothing worked; `body` is "" when nothing could be fetched, and `err` says why.
+HttpGetText(url, &body, &err) {
+    body := ""
+    err := ""
+    try {
+        whr := ComObject("WinHttp.WinHttpRequest.5.1")
+        whr.Open("GET", url, false)
+        whr.SetTimeouts(5000, 5000, 10000, 15000)
+        whr.SetRequestHeader("User-Agent", "ForgeNeoTray")
+        whr.Send()
+        body := whr.ResponseText
+        return whr.Status
+    } catch as e {
+        err := "WinHTTP: " Trim(e.Message)
+    }
+
+    ; --ssl-no-revoke: Windows' curl (schannel) fails outright when it can't reach a
+    ; certificate revocation server, which antivirus HTTPS scanning and VPNs can cause
+    tmp := A_Temp "\ForgeNeoTray_http_" A_TickCount "_" Random(1000, 9999) ".txt"
+    try FileDelete(tmp)
+    exitCode := -1
+    try {
+        exitCode := RunWait('curl.exe -s -L --ssl-no-revoke --max-time 20 -H "User-Agent: ForgeNeoTray" -o "' tmp '" "' url '"', , "Hide")
+    } catch as e2 {
+        err .= "; curl: " Trim(e2.Message)
+        return 0
+    }
+    if FileExist(tmp) {
+        try body := FileRead(tmp, "UTF-8")
+        try FileDelete(tmp)
+    }
+    if body = ""
+        err .= "; curl exit code " exitCode
+    return 0
+}
+
+; undoes JSON string escaping in one pass. Chained StrReplace calls get "\\n" wrong (a
+; literal backslash then n) and can't do \uXXXX at all. Line breaks come out as plain `n.
+JsonUnescape(s) {
+    out := ""
+    pos := 1
+    while RegExMatch(s, "\\(?:u([0-9a-fA-F]{4})|(.))", &m, pos) {
+        out .= SubStr(s, pos, m.Pos - pos)
+        pos := m.Pos + m.Len
+        if m[1] != "" {
+            code := Integer("0x" m[1])
+            ; characters outside the basic plane (emoji etc.) arrive as two \u escapes
+            if code >= 0xD800 && code <= 0xDBFF && RegExMatch(s, "\\u([dD][c-fC-F][0-9a-fA-F]{2})", &lo, pos) && lo.Pos = pos {
+                code := 0x10000 + ((code - 0xD800) << 10) + (Integer("0x" lo[1]) - 0xDC00)
+                pos := lo.Pos + lo.Len
+            }
+            try out .= Chr(code)
+        } else {
+            switch m[2] {
+                case "n": out .= "`n"
+                case "t": out .= "`t"
+                case "r", "b", "f": out .= ""
+                default: out .= m[2]
+            }
+        }
+    }
+    return out SubStr(s, pos)
+}
+
 ; grabs the release notes text from GitHub's API - not stored in git itself.
-; curl.exe + regex again, same as GetForgeConfigValue
-FetchGitHubReleaseNotes(workDir, tag) {
+; Returns "" on failure, with `reason` saying what actually went wrong so the dialog can
+; show it (this used to blame the internet connection for every possible failure)
+FetchGitHubReleaseNotes(workDir, tag, &reason) {
+    reason := ""
     slug := GetGitHubRepoSlug(workDir)
-    if slug = ""
+    if slug = "" {
+        reason := "couldn't read the GitHub repository from this install's git remote"
         return ""
+    }
     url := "https://api.github.com/repos/" slug "/releases/tags/" tag
-    tmp := A_Temp "\ForgeNeoTray_relnotes_" A_TickCount "_" Random(1000, 9999) ".json"
-    try FileDelete(tmp)
-    exitCode := RunWait('curl.exe -s -H "User-Agent: ForgeNeoTray" -o "' tmp '" "' url '"', , "Hide")
-    content := FileExist(tmp) ? FileRead(tmp) : ""
-    try FileDelete(tmp)
-    if exitCode != 0 || content = ""
+    status := HttpGetText(url, &content, &err)
+    if content = "" {
+        reason := "couldn't reach api.github.com (" err ")"
         return ""
-    if !RegExMatch(content, '"body"\s*:\s*"((?:[^"\\]|\\.)*)"', &m)
+    }
+    ; a real release object always has tag_name; anything else is GitHub's error JSON
+    ; (404 = no release published for that tag, 403 = rate limit, and so on)
+    if !RegExMatch(content, '"tag_name"\s*:') {
+        apiMsg := ""
+        if RegExMatch(content, '"message"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', &mm)
+            apiMsg := JsonUnescape(mm[1])
+        if status = 404 || apiMsg = "Not Found"
+            reason := "no GitHub release has been published for " tag
+        else
+            reason := "GitHub replied " (status ? "HTTP " status ": " : "") (apiMsg != "" ? apiMsg : "an unexpected response")
         return ""
-    body := StrReplace(m[1], "\r\n", "`n")
-    body := StrReplace(body, "\n", "`n")
-    body := StrReplace(body, "\t", "`t")
-    body := StrReplace(body, '\"', '"')
-    body := StrReplace(body, "\\", "\")
-    return Trim(body)
+    }
+    if !RegExMatch(content, '"body"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"', &m) {
+        reason := "the release for " tag " has no notes"
+        return ""
+    }
+    body := Trim(JsonUnescape(m[1]))
+    if body = "" {
+        reason := "the release for " tag " has no notes"
+        return ""
+    }
+    return body
 }
 
 ; reads the real output dirs from config.json if set, otherwise the default guess
@@ -534,6 +626,7 @@ ShowUpdateAvailableDialog(msg, releaseTag := "") {
     result := {proceed: false}
     expanded := false
     NotesEdit := 0
+    notesOK := false
     Dlg := Gui("-DPIScale", "Update Available")
     UpdateFlowGuiRef := Dlg
     Dlg.SetFont("s10")
@@ -558,11 +651,17 @@ ShowUpdateAvailableDialog(msg, releaseTag := "") {
     ; ShowUpdateResultNotice's ToggleExpand - fetches on first click only, not upfront.
     ToggleNotes(*) {
         expanded := !expanded
-        if !IsObject(NotesEdit) {
-            notesText := FetchGitHubReleaseNotes(ForgeNeoDir, releaseTag)
-            if notesText = ""
-                notesText := "(couldn't load release notes - check your internet connection)"
-            NotesEdit := Dlg.AddEdit("xm y" (eby + ebh + 10) " w400 h150 -Theme ReadOnly VScroll Multi", notesText)
+        ; a failed fetch isn't cached - expanding again retries instead of showing the
+        ; same error until the dialog is reopened
+        if !IsObject(NotesEdit) || !notesOK {
+            notesText := FetchGitHubReleaseNotes(ForgeNeoDir, releaseTag, &reason)
+            notesOK := notesText != ""
+            if !notesOK
+                notesText := "(couldn't load release notes: " reason ")"
+            if IsObject(NotesEdit)
+                NotesEdit.Value := notesText
+            else
+                NotesEdit := Dlg.AddEdit("xm y" (eby + ebh + 10) " w400 h150 -Theme ReadOnly VScroll Multi", notesText)
         }
         NotesEdit.Visible := expanded
         ExpandBtn.Text := expanded ? "Hide Release Notes" : "Show Release Notes"
@@ -1232,7 +1331,7 @@ ShowCenteredNotice(title, message, offerSettings := false, offerRestart := false
 
 ; ============ Settings window ============
 OpenSettingsWindow(*) {
-    global ForgeNeoDir, ForgeNeoBat, ForgeNeoURL, SettingsPath, SettingsGuiRef, HideConsoleOnLaunch, StartupDelaySeconds, PendingSettingsAlwaysOnTop, UpdateMode, CheckUpdatesOnLaunch, EnableExtensionsUpdater, DoubleClickAction, DoubleClickIntervalMs, CheckSelfUpdatesOnLaunch
+    global ForgeNeoDir, ForgeNeoBat, ForgeNeoURL, SettingsPath, SettingsGuiRef, HideConsoleOnLaunch, StartupDelaySeconds, PendingSettingsAlwaysOnTop, UpdateMode, CheckUpdatesOnLaunch, EnableExtensionsUpdater, DoubleClickAction, DoubleClickIntervalMs, CheckSelfUpdatesOnLaunch, ControlClickAction
 
     if IsObject(SettingsGuiRef) {
         WinActivate("ahk_id " SettingsGuiRef.Hwnd)
@@ -1247,18 +1346,25 @@ OpenSettingsWindow(*) {
     SettingsGui.SetFont("s10")
     HoverTips := Map()
 
-    SettingsGui.AddText("xm ym", "Path to webui-user.bat:")
-    BatEdit := SettingsGui.AddEdit("xm w470 vBatEdit -Theme", ForgeNeoDir "\" ForgeNeoBat)
+    TabCtrl := SettingsGui.AddTab3("xm ym w630 h410", ["General", "Updates", "Launch Arguments"])
+    TabCtrl.GetPos(&tabX, &tabY, &tabW, &tabH)
+    tabContentX := tabX + 14 ; small inset so content isn't flush against the tab's own border
+    tabContentY := tabY + 36 ; clears the tab strip itself
+
+    TabCtrl.UseTab(1)
+
+    SettingsGui.AddText("x" tabContentX " y" tabContentY, "Path to webui-user.bat:")
+    BatEdit := SettingsGui.AddEdit("x" tabContentX " y+5 w470 vBatEdit -Theme", ForgeNeoDir "\" ForgeNeoBat)
     BrowseBtn := SettingsGui.AddButton("x+10 w95 yp-2", "Browse...")
     BrowseBtn.OnEvent("Click", BrowseAndRefreshArgs)
     HoverTips[BatEdit.Hwnd] := "Full path to your webui-user.bat file. Requires a restart to take effect."
     HoverTips[BrowseBtn.Hwnd] := "Browse for your webui-user.bat file. Requires a restart to take effect."
 
-    SettingsGui.AddText("xm y+15", "Forge Neo URL:")
-    UrlEdit := SettingsGui.AddEdit("xm w575 vUrlEdit -Theme", ForgeNeoURL)
+    SettingsGui.AddText("x" tabContentX " y+15", "Forge Neo URL:")
+    UrlEdit := SettingsGui.AddEdit("x" tabContentX " y+5 w575 vUrlEdit -Theme", ForgeNeoURL)
     HoverTips[UrlEdit.Hwnd] := "Forge Neo's WebUI address. Only change this if you've customised the port. Requires a restart."
 
-    StartupCheck := SettingsGui.AddCheckbox("xm y+15 vStartupCheck", "Start with Windows")
+    StartupCheck := SettingsGui.AddCheckbox("x" tabContentX " y+15 vStartupCheck", "Start with Windows")
     StartupCheck.Value := (GetStartupRegistryPath() = A_ScriptFullPath)
     StartupCheck.OnEvent("Click", ClearStartupSuppress)
     HoverTips[StartupCheck.Hwnd] := "Launches ForgeNeoTray automatically at Windows startup. Takes effect next sign-in."
@@ -1267,14 +1373,14 @@ OpenSettingsWindow(*) {
     HideConsoleCheck.Value := HideConsoleOnLaunch
     HoverTips[HideConsoleCheck.Hwnd] := "Hides the console window on launch. Requires a restart to take effect."
 
-    SettingsGui.AddText("xm y+15", "Startup delay (seconds):")
+    SettingsGui.AddText("x" tabContentX " y+15", "Startup delay (seconds):")
     DelayEdit := SettingsGui.AddEdit("x+10 w60 vDelayEdit Number yp-2 -Theme", StartupDelaySeconds)
     HoverTips[DelayEdit.Hwnd] := "Delay before the first launch at Windows startup. Doesn't apply to Restart Forge Neo."
 
-    SettingsGui.AddText("xm y+18", "Double-click tray icon action:")
+    SettingsGui.AddText("x" tabContentX " y+18", "Double-click tray icon action:")
     DoubleClickCombo := SettingsGui.AddDropDownList("x+10 w280 vDoubleClickCombo -Theme", ["Launch in browser", "Open most recent output folder", "Open saved image folder", "Open install folder", "Open models folder"])
     doubleClickIndex := 1
-    for i, val in GetDoubleClickOptionValues() {
+    for i, val in GetTrayClickOptionValues() {
         if val = DoubleClickAction {
             doubleClickIndex := i
             break
@@ -1283,32 +1389,48 @@ OpenSettingsWindow(*) {
     DoubleClickCombo.Value := doubleClickIndex
     HoverTips[DoubleClickCombo.Hwnd] := "What double-clicking the tray icon does. Single-click still shows/hides the console."
 
-    SettingsGui.AddText("xm y+15", "Tray double-click speed (ms):")
+    SettingsGui.AddText("x" tabContentX " y+15", "Tray double-click speed (ms):")
     IntervalEdit := SettingsGui.AddEdit("x+10 w60 vIntervalEdit Number yp-2 -Theme", DoubleClickIntervalMs)
     HoverTips[IntervalEdit.Hwnd] := "Max time between clicks that still counts as a double-click. Default 200."
 
-    CheckSelfUpdatesCheck := SettingsGui.AddCheckbox("xm y+8 vCheckSelfUpdatesCheck", "Check for ForgeNeoTray updates on launch")
+    SettingsGui.AddText("x" tabContentX " y+18", "Control-click tray icon action:")
+    ControlClickCombo := SettingsGui.AddDropDownList("x+10 w280 vControlClickCombo -Theme", ["Launch in browser", "Open most recent output folder", "Open saved image folder", "Open install folder", "Open models folder"])
+    controlClickIndex := 1
+    for i, val in GetTrayClickOptionValues() {
+        if val = ControlClickAction {
+            controlClickIndex := i
+            break
+        }
+    }
+    ControlClickCombo.Value := controlClickIndex
+    HoverTips[ControlClickCombo.Hwnd] := "What Ctrl+clicking the tray icon does. Fires immediately, without waiting to see if a second click follows."
+
+    TabCtrl.UseTab(2)
+
+    CheckSelfUpdatesCheck := SettingsGui.AddCheckbox("x" tabContentX " y" tabContentY " vCheckSelfUpdatesCheck", "Check for ForgeNeoTray updates on launch")
     CheckSelfUpdatesCheck.Value := CheckSelfUpdatesOnLaunch
     HoverTips[CheckSelfUpdatesCheck.Hwnd] := "Checks GitHub for a newer ForgeNeoTray release after launch. Clicking the notification opens the release page - nothing installs automatically."
 
-    CheckUpdatesCheck := SettingsGui.AddCheckbox("xm y+15 vCheckUpdatesCheck", "Check for SD Forge Neo updates on launch")
+    CheckUpdatesCheck := SettingsGui.AddCheckbox("x" tabContentX " y+15 vCheckUpdatesCheck", "Check for SD Forge Neo updates on launch")
     CheckUpdatesCheck.Value := CheckUpdatesOnLaunch
     HoverTips[CheckUpdatesCheck.Hwnd] := "Checks for an SD Forge Neo update a few seconds after launch and notifies you if one's found. Never installs automatically. Needs a full restart of ForgeNeoTray to take effect."
 
-    SettingsGui.AddText("xm y+15", "Update SD Forge Neo from:")
+    SettingsGui.AddText("x" tabContentX " y+15", "Update SD Forge Neo from:")
     UpdateModeDDL := SettingsGui.AddDropDownList("x+10 w330 vUpdateModeDDL -Theme", ["Latest stable release", "Latest commits — may include WIP/bugs"])
     UpdateModeDDL.Value := (UpdateMode = "head") ? 2 : 1
     HoverTips[UpdateModeDDL.Hwnd] := "Latest stable release checks tagged versions only. Latest commits tracks the branch directly, newer but may include unfinished work."
 
-    ExtUpdaterCheck := SettingsGui.AddCheckbox("xm y+8 vExtUpdaterCheck", "Enable extensions updater in tray menu (untested)")
+    ExtUpdaterCheck := SettingsGui.AddCheckbox("x" tabContentX " y+8 vExtUpdaterCheck", "Enable extensions updater in tray menu")
     ExtUpdaterCheck.Value := EnableExtensionsUpdater
     HoverTips[ExtUpdaterCheck.Hwnd] := "Adds an Extensions option under Check for Updates in the tray."
+
+    TabCtrl.UseTab(3)
 
     OriginalArgsStr := ReadCommandLineArgs(ForgeNeoDir "\" ForgeNeoBat)
     ArgDefsList := GetArgDefs()
     ParsedArgs := ParseArgsIntoDefs(OriginalArgsStr, ArgDefsList)
 
-    HeaderCtrl := SettingsGui.AddText("xm y+18", "Command-line Arguments:")
+    HeaderCtrl := SettingsGui.AddText("x" tabContentX " y" tabContentY, "Command-line Arguments:")
     HeaderCtrl.GetPos(&hx, &hy, &hw, &hh)
     gridX := hx
     gridY := hy + hh + 6
@@ -1361,8 +1483,13 @@ OpenSettingsWindow(*) {
         }
     }
 
-    LastChk := ArgCheckCtrls[ArgCheckCtrls.Length]
-    LastChk.GetPos(&lx, &ly, &lw, &lh)
+    ; the tallest column's last row, not necessarily the last array entry - with
+    ; an odd number of args the two columns aren't the same height, so the last
+    ; entry (bottom of the shorter column) would sit above the taller column's
+    ; last row
+    AnyChk := ArgCheckCtrls[1]
+    AnyChk.GetPos(,, , &lh)
+    ly := gridY + (totalRows - 1) * rowH
 
     ; medvram/lowvram are mutually exclusive - grey out the other, unless both are
     ; already ticked (edited by hand) in which case leave both alone so it's fixable
@@ -1412,7 +1539,10 @@ OpenSettingsWindow(*) {
         UpdateCorsEnabled()
     }
 
-    CancelBtn := SettingsGui.AddButton("xm y+20 w110", "Cancel")
+    TabCtrl.UseTab()
+
+    btnY := tabY + tabH + 20
+    CancelBtn := SettingsGui.AddButton("xm y" btnY " w110", "Cancel")
     SaveRestartBtn := SettingsGui.AddButton("xm+205 yp w160", "Save && Restart")
     SaveBtn := SettingsGui.AddButton("xm+445 yp w130 Default", "Save")
 
@@ -1469,7 +1599,7 @@ OpenSettingsWindow(*) {
     }
 
     SaveClicked(restart) {
-        global ForgeNeoDir, ForgeNeoBat, ForgeNeoURL, SettingsPath, HideConsoleOnLaunch, StartupDelaySeconds, UpdateMode, CheckUpdatesOnLaunch, EnableExtensionsUpdater, DoubleClickAction, DoubleClickIntervalMs, CheckSelfUpdatesOnLaunch
+        global ForgeNeoDir, ForgeNeoBat, ForgeNeoURL, SettingsPath, HideConsoleOnLaunch, StartupDelaySeconds, UpdateMode, CheckUpdatesOnLaunch, EnableExtensionsUpdater, DoubleClickAction, DoubleClickIntervalMs, CheckSelfUpdatesOnLaunch, ControlClickAction
         saved := SettingsGui.Submit(false)
         fullBatPath := saved.BatEdit
         newUrl := saved.UrlEdit
@@ -1479,12 +1609,18 @@ OpenSettingsWindow(*) {
         newCheckUpdates := saved.CheckUpdatesCheck
         newCheckSelfUpdates := saved.CheckSelfUpdatesCheck
         newExtUpdater := saved.ExtUpdaterCheck
-        dcOptions := GetDoubleClickOptionValues()
+        dcOptions := GetTrayClickOptionValues()
         comboVal := DoubleClickCombo.Value
         if comboVal < 1 || comboVal > dcOptions.Length
             comboVal := 1
         newDoubleClickAction := dcOptions[comboVal]
         newDoubleClickInterval := saved.IntervalEdit != "" ? Integer(saved.IntervalEdit) : 200
+
+        ccOptions := GetTrayClickOptionValues()
+        ccComboVal := ControlClickCombo.Value
+        if ccComboVal < 1 || ccComboVal > ccOptions.Length
+            ccComboVal := 5
+        newControlClickAction := ccOptions[ccComboVal]
 
         if !FileExist(fullBatPath) {
             MsgBox("That .bat file couldn't be found. Please check the path and try again.", "Forge Neo Tray", "Icon!")
@@ -1517,6 +1653,7 @@ OpenSettingsWindow(*) {
         EnableExtensionsUpdater := newExtUpdater
         DoubleClickAction := newDoubleClickAction
         DoubleClickIntervalMs := newDoubleClickInterval
+        ControlClickAction := newControlClickAction
         if !SuppressStartupWrite
             SetStartupState(saved.StartupCheck)
 
@@ -1531,6 +1668,7 @@ OpenSettingsWindow(*) {
         IniWrite(EnableExtensionsUpdater, SettingsPath, "Settings", "EnableExtensionsUpdater")
         IniWrite(DoubleClickAction, SettingsPath, "Settings", "DoubleClickAction")
         IniWrite(DoubleClickIntervalMs, SettingsPath, "Settings", "DoubleClickIntervalMs")
+        IniWrite(ControlClickAction, SettingsPath, "Settings", "ControlClickAction")
 
         SetTrayIcon()
         CloseSettings()
@@ -1625,6 +1763,7 @@ GetArgDefs() {
         ["--cuda-stream", false, "", "Enables asynchronous CUDA operations to overlap computation and data transfer, often improving speed."],
         ["--pin-shared-memory", false, "", "Uses pinned (page-locked) memory for faster CPU-GPU data transfers."],
         ["--nunchaku", false, "", "Enables support for Nunchaku-quantised (INT4) models for faster inference with lower VRAM use."],
+        ["--disable-sage", false, "", "Disables SageAttention. Useful if it's causing errors or artifacts on your GPU, at some cost to speed."],
         ["--cors-allow-origins", true, "*", "Allows web pages from the specified origin(s) to access the API. Use * to allow any origin."],
         ["--api", false, "", "Enables the REST API, needed for external tools (browser extensions, scripts) to control Forge Neo."],
         ["--listen", false, "", "Makes the WebUI accessible from other devices on your network, not just this PC."],
@@ -1726,6 +1865,7 @@ FirstRunSetup() {
         IniWrite(0, SettingsPath, "Settings", "EnableExtensionsUpdater")
         IniWrite("browser", SettingsPath, "Settings", "DoubleClickAction")
         IniWrite(200, SettingsPath, "Settings", "DoubleClickIntervalMs")
+        IniWrite("models", SettingsPath, "Settings", "ControlClickAction")
         IniWrite(1, SettingsPath, "Settings", "CheckSelfUpdatesOnLaunch")
 
         InitRuntimeGlobals()
